@@ -5,6 +5,12 @@
 
 진행 방식: 한 단계씩 완료 → 검증 → 기록 → 다음 단계.
 
+참고 문서:
+- [GitHub Actions 워크플로 문법 정리](./github-actions-syntax-reference.md) —
+  `ci.yml`에 쓰인 YAML/표현식 문법을 항목별로 설명
+- [배포 자동화 대안: 터널 방식](./deploy-alternatives-tunnel.md) —
+  self-hosted runner 대신 ngrok/cloudflared를 쓰는 경우 비교
+
 ---
 
 ## 1단계: NestJS 컨테이너화 (완료)
