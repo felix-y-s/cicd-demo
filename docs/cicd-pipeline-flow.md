@@ -40,7 +40,7 @@ flowchart TD
 가능 여부)을 검증한다. **PR 단계에서 문제를 잡아내는 게 목적**이므로,
 이 job에는 배포 관련 로직이 전혀 없다.
 
-### 2. 분기점: PR인가, main push인가
+### 2. 분기점(`build-and-push` job): PR인가, main push인가
 
 `build-and-push` job에 걸린 조건:
 ```yaml
@@ -51,7 +51,7 @@ PR에서는 이 조건이 거짓이라 `build-and-push` 이후 모든 job
 문제없는지" 검증만 하고, 실제 이미지 빌드/배포는 main에 merge된 뒤에만
 일어난다.**
 
-### 3. 이미지를 왜 두 갈래로 나눠 빌드하는가
+### 3. 이미지를 왜 두 갈래로 나눠 빌드하는가 (`build-and-push` + `push-ghcr` job)
 
 처음에는 `platforms: linux/amd64,linux/arm64`를 한 job에서 QEMU로
 동시에 에뮬레이션했다. 그런데 이미지 최적화 과정에서 추가한
@@ -68,7 +68,7 @@ amd64/arm64를 **각각 진짜 하드웨어 러너**에서 독립적으로 빌�
   `docker buildx imagetools create`로 **하나의 멀티플랫폼 매니페스트**로
   합치고 그제서야 `latest`/`sha-*` 태그를 부여한다.
 
-### 4. 왜 배포만 self-hosted runner에서 도는가
+### 4. 왜 `deploy` job만 self-hosted runner에서 도는가
 
 `deploy` job만 `runs-on: self-hosted`다. GitHub 클라우드 러너는 인터넷
 어딘가에서 실행되므로, 사설 네트워크에 있는 로컬 배포 서버(Mac 위
@@ -77,13 +77,13 @@ Mac 자체를 GitHub Actions 러너로 등록해, 이 job만 "GitHub이 아니�
 컴퓨터에서" 실행되게 했다. 그러면 `localhost:2222`로 배포 서버에 바로
 SSH 접속할 수 있다.
 
-### 5. 배포 단계가 실제로 하는 일
+### 5. 배포 단계(`deploy` job)가 실제로 하는 일
 
 ```mermaid
 sequenceDiagram
     participant GA as GitHub Actions<br/>(self-hosted, 이 Mac)
     participant DS as 로컬 배포 서버<br/>(Docker 컨테이너, SSH:2222)
-    participant GHCR as GHCR
+    participant GHCR as GHCR<br>(도커 이미지 저장소)
     participant DB as PostgreSQL/Mongo/<br/>Redis/RabbitMQ (호스트)
 
     GA->>DS: SSH 접속 (개인키 인증)
@@ -111,3 +111,29 @@ sequenceDiagram
 | 다이제스트만 먼저 push, 태그는 나중에 | 두 아키텍처 빌드가 끝나야 완전한 멀티플랫폼 이미지가 되므로 |
 | deploy만 self-hosted | 클라우드 러너가 사설망 배포 서버에 도달 불가능 |
 | SSH 개인키를 Secrets로 관리 | 워크플로가 어떤 러너에서 돌든 동일하게 동작(이식성) |
+
+---
+
+## 지금 파이프라인에 빠진 안전장치
+```mermaid
+flowchart TD
+    A["main push"] --> B["test → build → GHCR push"]
+    B --> C["deploy job 시작"]
+    C --> D{"지금 파이프라인에<br/>있는가?"}
+    D -->|"승인 절차 (Environment protection)"| M1["❌ 없음"]
+    D -->|"스테이징 배포 후 검증"| M2["❌ 없음"]
+    D -->|"배포 실패 시 자동 롤백"| M3["❌ 없음<br/>(헬스체크 실패해도 이전 컨테이너 복구 안 됨)"]
+    D -->|"카나리/블루-그린"| M4["❌ 없음<br/>(즉시 전체 트래픽 교체)"]
+    M1 & M2 & M3 & M4 --> E["바로 프로덕션 컨테이너 교체"]
+```
+
+| 안전장치 | 지금 상태 | 실무에서 흔한 이유 |
+|---|---|---|
+| 헬스체크 실패 시 롤백 | 없음 — `curl -sf` 실패해도 이전 컨테이너는 이미 삭제된 뒤라 복구 안 됨 | 배포 실패가 곧 서비스 다운으로 이어지는 걸 방지 |
+| 스테이징 환경 사전 검증 | 없음 — main push가 곧바로 유일한 환경에 배포 | 프로덕션 트래픽 전에 실제 환경과 유사한 곳에서 최종 검증 |
+| 배포 승인(사람 확인) | 없음 — GitHub Environments의 required reviewers로 추가 가능 | 리스크 큰 서비스는 자동 배포 전 사람 확인을 강제 |
+| 무중단 배포(블루-그린 등) | 없음 — `docker rm -f` 후 `docker run`이라 그 사이 순간적 다운타임 발생 | 배포 순간 사용자가 502를 보는 것을 방지 |
+
+이 실습은 "파이프라인이 처음부터 끝까지 자동으로 이어지는가"를
+검증하는 것이 목표였고 그건 달성됐다. 다만 실제 프로덕션 서비스에
+그대로 쓰기엔 위 안전장치들이 필요하다.
