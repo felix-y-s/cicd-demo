@@ -729,6 +729,14 @@ systemd/launchd 서비스로 등록해 자동 재시작되게 하거나, GitHub�
 ### 다음에 기록할 것 (남은 작업)
 - [ ] self-hosted runner를 `nohup` 대신 launchd 서비스로 등록해 안정성
   높이기 (또는 실습이 끝나면 완전히 내리고 정리)
+  - **왜 아직 안 했나**: launchd 등록은 "지금 nohup으로 떠 있는 것과
+    똑같은 러너 프로세스를, macOS가 자동으로 관리(재부팅 시 자동 시작,
+    크래시 시 자동 재시작)해주게 바꾸는 것"뿐이라 하는 일 자체는 동일하다.
+    러너 패키지 안의 `svc.sh` (`./svc.sh install && ./svc.sh start`)로
+    간단히 전환 가능하지만, 커리큘럼의 학습 목표(파이프라인이 실제로
+    동작하는가)와는 결이 다른 "인프라 안정화" 작업이라 우선순위를
+    낮게 두고 보류함. 이 실습 환경을 계속 상시 운영할 계획이라면
+    진행할 가치가 있다.
 - [x] ngrok/cloudflared 터널 방식을 self-hosted runner의 대안으로
   별도 문서에 정리 (사용자 요청) → [docs/deploy-alternatives-tunnel.md](./deploy-alternatives-tunnel.md)
 
