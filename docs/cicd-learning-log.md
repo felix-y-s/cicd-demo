@@ -304,6 +304,10 @@ test)로 재현. → **19개 테스트 파일, 131개 테스트 전부 통과** 
 - 완벽한 해결책은 아니며, 재발 시 `amqp-connection-manager` 버전 업데이트나
   `disconnect()`에 연결 close 전 짧은 drain 대기를 추가하는 것도 고려 가능.
 
+**결과**: 재push 후 실제 CI에서 전체 성공 확인 (1분 51초, 4개 인프라 +
+131개 테스트 + build + docker build 전부 통과).
+PR: https://github.com/felix-y-s/cicd-demo/pull/1
+
 ---
 
 ## 3단계: (예정)
