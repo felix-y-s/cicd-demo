@@ -707,5 +707,5 @@ PR: https://github.com/felix-y-s/cicd-demo/pull/4
 - [ ] self-hosted runner를 계속 켜둘지, 언제 꺼야 하는지 정리 (지금은
   `nohup ./run.sh`로 백그라운드 실행 중 — 터미널/Mac 재시작 시 관리 방법
   검토 필요)
-- [ ] ngrok/cloudflared 터널 방식을 self-hosted runner의 대안으로
-  별도 문서에 정리 (사용자 요청)
+- [x] ngrok/cloudflared 터널 방식을 self-hosted runner의 대안으로
+  별도 문서에 정리 (사용자 요청) → [docs/deploy-alternatives-tunnel.md](./deploy-alternatives-tunnel.md)
