@@ -804,3 +804,74 @@ docker run -d --network cicd-demo_default --env-file <test.env> -p 3003:3000 nes
 - 실패한 시도(`.pnpm` 전체 복사)도 그 자체로 유용한 정보였다 — "왜 이
   방법이 이 프로젝트의 패키지 매니저 구조와 안 맞는지"를 실제로 크기를
   재보고 확인한 것이 다음 시도의 방향을 잡는 데 도움이 됐다.
+
+### [트러블슈팅] 로컬 검증 통과 후 실제 CI(main push)에서만 재현된 QEMU 크래시
+
+로컬에서 `docker build`로 최적화된 Dockerfile을 검증하고 PR을 merge했는데,
+실제 `main` push 시 `push-ghcr` job이 실패함:
+```
+#28 21.26 qemu: uncaught target signal 4 (Illegal instruction) - core dumped
+#28 ERROR: ... "pnpm install --frozen-lockfile --prod --ignore-scripts
+    && pnpm dlx prisma@7.10.0 generate" did not complete successfully: exit code: 132
+```
+로그를 보면 `linux/amd64` 빌드는 성공했고, `linux/arm64` 빌드에서만
+크래시함.
+
+**원인**: 3단계에서 멀티플랫폼 빌드(QEMU 에뮬레이션)를 이미 검증했었지만,
+그때는 순수 Node.js/TypeScript 코드만 실행했다. 이번에 새로 추가한
+`pnpm dlx prisma generate`는 Prisma의 네이티브 쿼리 엔진(Rust로 컴파일된
+바이너리)을 실행하는데, 이런 저수준 네이티브 바이너리는 QEMU
+에뮤레이션 환경에서 명령어 미지원이나 타이밍 문제로 크래시하는 경우가
+실제로 있다. 로컬(Apple Silicon Mac)에서는 문제가 없었던 이유는, 로컬은
+진짜 arm64 하드웨어라 에뮬레이션이 필요 없었기 때문 — CI(amd64 러너가
+arm64를 QEMU로 흉내 내는 상황)에서만 재현되는 문제였다.
+
+**해결**: QEMU 에뮬레이션 대신, GitHub가 제공하는 **네이티브 arm64
+러너**(`ubuntu-24.04-arm`)를 사용하도록 워크플로 구조를 변경.
+- `push-ghcr` job 하나에서 `platforms: linux/amd64,linux/arm64`로 동시
+  빌드하던 방식을 버리고,
+- `build-and-push`라는 새 job을 `strategy.matrix`로 나눠 `linux/amd64`는
+  `ubuntu-latest`, `linux/arm64`는 `ubuntu-24.04-arm`에서 각각
+  **독립적인 진짜 하드웨어**로 빌드
+- 각 매트릭스 job은 태그 없이 다이제스트만 GHCR에 push
+  (`push-by-digest=true`)하고 `actions/upload-artifact`로 다이제스트
+  값을 다음 job에 전달
+- 별도의 `push-ghcr` job이 두 다이제스트를 다운로드해
+  `docker buildx imagetools create`로 하나의 멀티플랫폼 매니페스트로
+  합치고 `latest`/`sha-*` 태그를 최종 부여
+
+이 저장소가 **public이라 GitHub Actions 표준 러너(arm64 포함)를 무료로
+무제한 사용**할 수 있어 추가 비용 없이 적용 가능했다.
+
+### 최종 검증 (PR#6 merge 후)
+```
+test (1분 55초)
+→ build-and-push (linux/amd64, ubuntu-latest) (2분 51초)
+→ build-and-push (linux/arm64, ubuntu-24.04-arm) (2분 15초)   ← 병렬 실행
+→ push-ghcr (매니페스트 병합) (14초)
+→ deploy (1분 10초)
+```
+전부 성공. 로컬(Apple Silicon Mac)에서 재검증:
+```
+docker pull ghcr.io/felix-y-s/cicd-demo:latest
+# → 성공, 803MB (최적화 유지됨)
+docker inspect ... --format '{{.Architecture}}/{{.Os}}'  # → arm64/linux
+```
+배포 서버도 실제로 갱신됨:
+```
+ssh ... deployer@localhost "docker ps --filter name=nest-app --format '{{.Names}}: {{.Status}}'"
+# → nest-app: Up 42 seconds
+curl http://localhost:3000/  # → 200
+```
+
+PR: https://github.com/felix-y-s/cicd-demo/pull/6
+
+### 교훈 (추가)
+- **"로컬 검증 통과"와 "CI 환경에서 통과"는 다른 질문**이다. 이번엔
+  로컬이 우연히 진짜 arm64 하드웨어였기 때문에 QEMU 에뮬레이션이라는
+  변수 자체가 로컬 테스트에서 빠져 있었다. 크로스 플랫폼 빌드를 쓸 때는
+  "로컬에서 됐다"가 아니라 "에뮬레이션 경로까지 CI에서 실제로 통과했는가"를
+  확인해야 한다.
+- 네이티브 바이너리(Prisma 엔진, 데이터베이스 드라이버 등)를 빌드
+  단계에서 실행해야 한다면, QEMU 에뮬레이션보다 네이티브 러너를 우선
+  고려하는 게 안전하다. public 저장소라면 비용 부담 없이 가능한 선택지.
