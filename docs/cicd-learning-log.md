@@ -398,9 +398,16 @@ PR: https://github.com/felix-y-s/cicd-demo/pull/2
   (별도 시크릿 불필요)
 - 패키지는 예상과 달리 첫 push부터 이미 public 상태였음
 - **크로스 플랫폼 배포를 고려한다면 `platforms` 지정은 선택이 아니라
-  필수**임을 실제 실패로 체감 (CI 러너와 배포 대상의 아키텍처가 다를 수
-  있다는 걸 놓치면 "빌드는 성공했는데 배포 환경에서 pull이 안 되는"
-  상황이 생김)
+  필수**임을 실제 실패로 체감. 무엇을 했는지:
+  1. `.github/workflows/ci.yml`의 `push-ghcr` job에
+     `docker/setup-qemu-action@v4` 스텝을 `setup-buildx-action` 앞에 추가
+     (크로스 아키텍처 빌드에 필요한 에뮬레이션 활성화)
+  2. `docker/build-push-action@v7`에 `platforms: linux/amd64,linux/arm64`
+     옵션을 추가 (기본값은 러너와 같은 amd64 하나만 빌드됨)
+  3. 재push 후 로컬(arm64 Mac)에서 `docker pull` → 성공, `docker inspect
+     --format '{{.Architecture}}'` → `arm64` 확인
+  → 결론: CI 러너와 배포 대상의 아키텍처가 다를 수 있다는 걸 놓치면
+  "빌드는 성공했는데 배포 환경에서 pull이 안 되는" 상황이 생긴다.
 
 ---
 
