@@ -593,7 +593,7 @@ GHCR (이미지 저장소)
 
 ---
 
-## 5단계: 배포 자동화 (진행 중)
+## 5단계: 배포 자동화 (완료)
 
 ### 목표
 4단계에서 손으로 하나씩 실행했던 것(SSH 접속 → GHCR pull → docker run →
@@ -677,8 +677,35 @@ ssh ... deployer@localhost "curl -sf http://localhost:3000/ > /dev/null && echo 
 # → "배포 성공: 앱이 정상 응답함"
 ```
 
-### 다음에 기록할 것
-- [ ] 실제 push 후 GitHub Actions에서 test → push-ghcr → deploy 전체가
-  자동으로 이어지는지 확인
-- [ ] self-hosted runner를 계속 켜둘지, 언제 꺼야 하는지 정리
-- [ ] ngrok/cloudflared 방식 별도 문서 작성
+### 최종 검증 (PR#4 merge 후)
+`main`에 push한 것만으로 전체 파이프라인이 완전 자동으로 이어짐:
+```
+test (1분 41초) → push-ghcr (2분 6초) → deploy (24초)
+```
+`deploy` job 로그: SSH 개인키 준비 → 이미지 pull/재기동 → 헬스체크
+("배포 성공: 앱이 정상 응답함") → 개인키 정리, 전부 성공.
+
+실제로 배포 서버에 접속해 컨테이너가 방금 갱신됐는지 직접 확인:
+```
+ssh -i ~/.ssh/cicd-demo-deploy -p 2222 deployer@localhost \
+  "docker ps --filter name=nest-app --format '{{.Names}}: {{.Status}}'"
+# → nest-app: Up 25 seconds   (GitHub Actions가 방금 재기동한 것)
+```
+
+PR: https://github.com/felix-y-s/cicd-demo/pull/4
+
+### 5단계 전체 요약
+- NestJS 코드를 `main`에 push하면: 테스트 → Docker 빌드 → GHCR push →
+  로컬 배포 서버 SSH 접속 → 최신 이미지로 재기동 → 헬스체크까지
+  **사람 개입 없이 자동으로** 끝난다. 4단계에서 손으로 검증했던 절차를
+  그대로 자동화한 것.
+- self-hosted runner가 "왜 필요했는지"가 이번 단계의 핵심 개념:
+  GitHub 클라우드 러너는 사설 네트워크의 배포 서버에 도달할 수 없으므로,
+  배포 서버와 같은 네트워크에 있는 컴퓨터(이 Mac)를 러너로 등록해야 했다.
+
+### 다음에 기록할 것 (남은 작업)
+- [ ] self-hosted runner를 계속 켜둘지, 언제 꺼야 하는지 정리 (지금은
+  `nohup ./run.sh`로 백그라운드 실행 중 — 터미널/Mac 재시작 시 관리 방법
+  검토 필요)
+- [ ] ngrok/cloudflared 터널 방식을 self-hosted runner의 대안으로
+  별도 문서에 정리 (사용자 요청)
