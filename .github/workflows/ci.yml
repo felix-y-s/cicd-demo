@@ -115,6 +115,52 @@ jobs:
         run: pnpm build
 
       - name: Docker 이미지 빌드 검증
-        # 실제로 GHCR에 push하지는 않고, Dockerfile이 여전히 정상 빌드되는지만 검증한다.
-        # push는 3단계(GHCR 배포)에서 별도 job으로 추가할 예정.
         run: docker build -t nest-cicd-demo:ci .
+
+  push-ghcr:
+    runs-on: ubuntu-latest
+    # test job이 성공해야만 실행 (린트/테스트/빌드가 모두 통과한 코드만 배포 이미지로 만든다)
+    needs: test
+    # main 브랜치로의 push에서만 실행. PR에서는 빌드 검증만 하고 실제 push는 하지 않는다.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    # GITHUB_TOKEN으로 GHCR에 이미지를 push하려면 packages: write 권한이 필요하다.
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: GHCR 로그인
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # 별도로 발급받은 시크릿이 아니라, 워크플로 실행마다 GitHub가 자동
+          # 발급하는 임시 토큰. 위 permissions.packages: write 덕분에 push 권한을 가진다.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 이미지 메타데이터 추출 (태그/라벨)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short,prefix=sha-
+
+      - name: Docker Buildx 설정
+        uses: docker/setup-buildx-action@v3
+
+      - name: 빌드 및 GHCR push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 이전 빌드의 레이어 캐시를 GitHub Actions 캐시에서 재사용해 빌드 시간을 단축한다.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

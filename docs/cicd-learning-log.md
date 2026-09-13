@@ -310,11 +310,44 @@ PR: https://github.com/felix-y-s/cicd-demo/pull/1
 
 ---
 
-## 3단계: (예정)
+## 3단계: GHCR 이미지 배포 (진행 중)
 
----
+### 무엇을 했나
+- 기존 `.github/workflows/ci.yml`에 `push-ghcr` job 추가 (별도 cd.yml로
+  분리하지 않고 같은 워크플로 안에서 `needs: test`로 연결)
+- `test` job이 성공해야만 실행되고, `main` 브랜치로의 push에서만 실행
+  (`if: github.event_name == 'push' && github.ref == 'refs/heads/main'`)
+  → PR에서는 여전히 빌드 검증까지만 하고 실제 push는 안 함
+- 태그 전략: `latest` + `sha-<7자리 커밋 해시>` 두 개 동시 부여
+  (`docker/metadata-action`으로 자동 생성)
 
-## 3단계: (예정)
+### 왜 이렇게 설계했나
+- **`needs: test`**: "테스트를 통과한 코드만 배포 이미지가 된다"는 CI/CD의
+  핵심 원칙을 GitHub Actions의 job 의존성으로 강제. test가 실패하면
+  push-ghcr은 아예 실행되지 않는다(스킵).
+- **GITHUB_TOKEN 사용**: GHCR push에 별도 PAT(Personal Access Token)을
+  발급/등록할 필요 없이, 워크플로 실행마다 자동 발급되는 임시 토큰에
+  `permissions.packages: write`만 선언하면 충분. Docker Hub 대비 GHCR이
+  GitHub 프로젝트에서 다루기 쉬운 이유.
+- **latest + sha 이중 태그**: `latest`는 배포 서버가 "최신 버전"을 pull할
+  때 쓰고, `sha-*`는 특정 커밋 시점으로 롤백해야 할 때 쓴다.
+
+### 검증 방법
+GitHub Actions 러너 환경 자체는 로컬로 완전히 재현할 수 없어 push
+전까지 100% 확신은 어렵지만, 워크플로가 실제로 하는 핵심 동작(멀티태그
+Docker 빌드)은 로컬에서 재현 가능:
+```
+docker build -t ghcr.io/felix-y-s/cicd-demo:latest \
+             -t ghcr.io/felix-y-s/cicd-demo:sha-test123 .
+```
+→ 정상 빌드 확인 후 커밋.
+
+### 확인 필요 (push 후 점검할 것)
+- [ ] GHCR에 처음 push된 패키지는 기본적으로 **private**임. 5단계(배포
+  서버)에서 `docker pull`하려면 인증이 필요하거나 GitHub 저장소 설정에서
+  패키지를 public으로 전환해야 함 — 실제 push 후 확인 예정.
+- [ ] `docker/build-push-action`의 GHA 캐시(`cache-from/to: type=gha`)가
+  실제로 빌드 시간을 줄여주는지 두 번째 push부터 확인.
 
 ---
 
