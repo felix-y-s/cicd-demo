@@ -731,3 +731,76 @@ systemd/launchd 서비스로 등록해 자동 재시작되게 하거나, GitHub�
   높이기 (또는 실습이 끝나면 완전히 내리고 정리)
 - [x] ngrok/cloudflared 터널 방식을 self-hosted runner의 대안으로
   별도 문서에 정리 (사용자 요청) → [docs/deploy-alternatives-tunnel.md](./deploy-alternatives-tunnel.md)
+
+---
+
+## 추가 과제: 이미지 크기 최적화 (완료)
+
+1단계에서 미뤄뒀던 과제. 그때 이미지가 1.02GB였던 이유는 `runtime`
+스테이지가 devDependencies가 섞인 `node_modules`를 통째로 재사용했기
+때문이었다 (당시 `pnpm install --prod`가 `postinstall`의 `prisma
+generate`에서 실패해서 어쩔 수 없이 택한 방식).
+
+### 시도 1: `pnpm deploy` — 부적합
+`pnpm deploy`는 pnpm 워크스페이스(모노레포)에서 특정 패키지만 배포용으로
+추출하는 명령이라 `--filter`가 필수. 이 프로젝트는 단일 패키지라
+워크스페이스가 아니므로 애초에 맞지 않는 도구였음.
+
+### 시도 2: builder의 `.pnpm` 저장소 전체를 복사 — 실패(역효과)
+`pnpm install --prod --ignore-scripts`로 prod 전용 설치를 하고,
+Prisma Client 심볼릭 링크가 가리키는 실제 코드를 살리기 위해
+`node_modules/.pnpm` 전체를 builder에서 복사해봄:
+```
+COPY --from=builder /app/node_modules/.pnpm ./node_modules/.pnpm
+```
+**결과: 1.02GB → 1.58GB로 오히려 커짐.** `.pnpm`은 설치된 모든 패키지의
+실제 코드가 모이는 저장소이고, `node_modules/@prisma/client` 같은
+개별 폴더는 그 저장소를 가리키는 심볼릭 링크일 뿐이다. 저장소 전체를
+복사하면 devDependencies(TypeScript, vitest 등)의 실제 코드까지 그대로
+딸려오므로, "필요한 것만 골라 담으려던" 시도가 사실상 전체 복사와
+같아져 버렸다. 게다가 prod-deps 자체의 `.pnpm`과 builder의 `.pnpm`이
+레이어로 겹치면서 크기가 더 늘었다.
+
+`find node_modules/.pnpm -iname "*prisma*"`로 관련 패키지만 콕 집어
+복사하는 것도 검토했으나, `@prisma/client`, `@prisma/adapter-pg`,
+`@prisma/engines`, `@prisma/get-platform` 등이 서로 의존하는 체인이
+있어 하나라도 빠뜨리면 런타임에 원인 모를 module not found가 날 수
+있는 취약한 방식이라 포기.
+
+### 시도 3: `pnpm dlx`로 prisma CLI를 임시 실행 — 성공
+`prod-deps` 스테이지에서 prod 전용 설치를 `--ignore-scripts`로 마친 뒤,
+`pnpm dlx`(임시 실행, node_modules에 설치하지 않음)로 prisma CLI를 받아
+그 자리에서 `generate`만 실행:
+```dockerfile
+RUN pnpm install --frozen-lockfile --prod --ignore-scripts \
+    && pnpm dlx prisma@7.10.0 generate
+```
+이러면 `prod-deps`가 갖고 있는 자기 자신의 `.pnpm` 저장소 안에 Prisma
+Client가 정확히 생성되고, devDependencies는 전혀 설치되지 않는다.
+
+**결과: 1.02GB → 803MB (약 21% 감소).**
+
+### 검증
+```
+docker build -t nest-cicd-demo:optimized .
+docker images nest-cicd-demo --format "{{.Tag}}: {{.Size}}"
+# optimized: 803MB (기존 local: 1.02GB)
+
+# 소스/빌드 도구 잔존 확인
+docker run --rm nest-cicd-demo:optimized sh -c \
+  "ls src/*.ts 2>/dev/null; ls node_modules/.bin/ | grep -E 'tsc|vitest|oxlint'"
+# → 아무것도 안 나옴 (전부 없음, 1단계 검증과 동일 기준 통과)
+
+# 실제 기동 + DB 연결 + HTTP 검증
+docker run -d --network cicd-demo_default --env-file <test.env> -p 3003:3000 nest-cicd-demo:optimized
+# → PostgreSQL/RabbitMQ 연결 성공 로그, curl / → 200, curl /api-docs → 200
+```
+
+### 교훈
+- pnpm의 심볼릭 링크 구조를 "우회"하려 하기보다, **postinstall이 필요로
+  하는 도구(prisma CLI)를 `dlx`로 그때만 잠깐 빌려 쓰고 버리는 것**이
+  훨씬 안전하고 예측 가능했다. "필요한 파일만 골라 복사"는 pnpm처럼
+  의존성이 링크로 얽힌 구조에서는 오히려 더 위험한 접근일 수 있다.
+- 실패한 시도(`.pnpm` 전체 복사)도 그 자체로 유용한 정보였다 — "왜 이
+  방법이 이 프로젝트의 패키지 매니저 구조와 안 맞는지"를 실제로 크기를
+  재보고 확인한 것이 다음 시도의 방향을 잡는 데 도움이 됐다.
