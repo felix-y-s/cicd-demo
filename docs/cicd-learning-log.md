@@ -6,6 +6,8 @@
 진행 방식: 한 단계씩 완료 → 검증 → 기록 → 다음 단계.
 
 참고 문서:
+- [CI/CD 파이프라인 전체 흐름](./cicd-pipeline-flow.md) —
+  다이어그램으로 보는 전체 파이프라인 구조와 설계 이유
 - [GitHub Actions 워크플로 문법 정리](./github-actions-syntax-reference.md) —
   `ci.yml`에 쓰인 YAML/표현식 문법을 항목별로 설명
 - [배포 자동화 대안: 터널 방식](./deploy-alternatives-tunnel.md) —
