@@ -1,0 +1,47 @@
+generator client {
+  provider = "prisma-client-js"
+  // output을 지정하지 않으면 기본 위치(node_modules/@prisma/client)에 생성된다.
+  // pnpm 환경에서 node_modules/.prisma/client 같은 커스텀 위치를 쓰면 격리된
+  // node_modules 구조 때문에 @prisma/client-runtime-utils를 resolve하지 못하는
+  // 알려진 이슈(prisma/prisma#28685)가 있어 기본값을 그대로 둔다.
+}
+
+datasource db {
+  provider = "postgresql"
+  // Prisma 7+: url은 prisma.config.ts에서 관리 (schema에 url 없음)
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model User {
+  id                 String    @id @default(uuid())
+  email              String    @unique
+  passwordHash       String
+  refreshTokenHash   String?
+  role               Role      @default(USER)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime? // soft delete
+
+  posts              Post[]
+
+  @@map("users")
+}
+
+model Post {
+  id        String    @id @default(uuid())
+  title     String
+  content   String
+  authorId  String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime? // soft delete
+
+  author    User      @relation(fields: [authorId], references: [id])
+
+  @@index([authorId])
+  @@map("posts")
+}
