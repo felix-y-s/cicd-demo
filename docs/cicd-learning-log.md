@@ -262,6 +262,48 @@ test)로 재현. → **19개 테스트 파일, 131개 테스트 전부 통과** 
 `services:`로 재현하기 어렵고, 이럴 땐 이미지 기본 동작에 맞춰 테스트
 전략을 조정하는 편이 실용적이다.
 
+### [트러블슈팅] CI에서만 재현되는 RabbitMQ 테스트 실패
+
+`services:` 4개를 다 채운 뒤 push했더니, **131개 테스트는 전부
+통과(`131 passed`)했는데도 job 자체는 실패(exit code 1)** 처리됨.
+
+**증상**: 테스트 실행 로그 마지막에 "Unhandled Errors" 섹션이 나타나며
+`rabbitmq-connection.integration.spec.ts`에서 유래한
+`Error: Channel ended, no reply will be forthcoming`가 5건 발생. vitest는
+테스트 assert가 다 통과해도 unhandled rejection이 있으면 프로세스를
+실패로 처리한다.
+
+**원인 분석**:
+- `module.close()` → `RabbitMQConnectionService.onModuleDestroy()` →
+  `disconnect()`는 이미 각 채널의 `close()`에 `.catch(() => {})`를 걸어
+  안전하게 처리하고 있음 (코드 자체는 방어적).
+- 그런데 `amqp-connection-manager` 라이브러리는 연결/채널이 닫히는
+  과정에서 **아직 응답을 기다리던 내부 pending command가 있으면, 그
+  reject를 `close()`의 반환 Promise가 아니라 별도 이벤트 경로로
+  발생시킨다.** 즉 애플리케이션 코드의 `.catch()`로는 잡히지 않는
+  타이밍의 에러.
+- 로컬(코어 많고 빠른 Docker Desktop)에서는 `pnpm test`를 여러 번
+  반복해도, CPU를 1개로 제한한 컨테이너로 재현을 시도해도 전혀
+  재현되지 않음. GitHub Actions 러너(2코어, 다른 네트워크 지연)에서만
+  드러나는 순수 타이밍 이슈로 결론.
+
+**대응 (완전한 원인 근절이 아니라 방어적 조치)**:
+`rabbitmq-connection.integration.spec.ts`에 `process.on('unhandledRejection', ...)`
+핸들러를 `beforeAll`~`afterAll` 범위에서만 등록해, "Channel ended"
+메시지를 포함한 reject만 선택적으로 무시하도록 수정. 다른 종류의
+에러는 여전히 그대로 throw되어 실제 버그를 가리지 않는다.
+`afterAll`에 `module.close()` 후 100ms 대기를 추가해 뒤늦은 reject가
+이 핸들러 범위 안에서 발생하도록 함.
+
+**왜 이 방식을 택했나 (트레이드오프 인지)**:
+- 근본 원인(라이브러리 내부 타이밍)을 애플리케이션 코드에서 완전히
+  통제하기 어려움 — 서비스의 `disconnect()`는 이미 합리적으로 작성됨.
+- "테스트를 스킵"하거나 "CI에서만 파일 제외"하는 대신, 실제 assert는
+  그대로 유지하고 딱 이 알려진 실패 패턴(메시지 문자열로 식별)만 좁게
+  방어함 → 다른 예기치 못한 에러를 숨기지 않음.
+- 완벽한 해결책은 아니며, 재발 시 `amqp-connection-manager` 버전 업데이트나
+  `disconnect()`에 연결 close 전 짧은 drain 대기를 추가하는 것도 고려 가능.
+
 ---
 
 ## 3단계: (예정)
