@@ -593,4 +593,92 @@ GHCR (이미지 저장소)
 
 ---
 
-## 5단계: (예정)
+## 5단계: 배포 자동화 (진행 중)
+
+### 목표
+4단계에서 손으로 하나씩 실행했던 것(SSH 접속 → GHCR pull → docker run →
+헬스체크)을, `main` push 시 GitHub Actions가 자동으로 실행하게 만든다.
+
+### 핵심 문제: 클라우드 러너가 사설 IP에 도달할 수 없음
+GitHub Actions의 기본 러너(`ubuntu-latest` 등)는 GitHub의 클라우드에서
+실행되는데, 배포 서버(Mac 위 Docker 컨테이너, SSH 포트 2222)는 인터넷에
+노출되지 않은 사설 네트워크에 있다. 클라우드 러너가 이 사설 IP로 직접
+SSH 접속할 방법이 없다.
+
+**선택한 해결책**: self-hosted runner — GitHub Actions 러너 프로그램을
+이 Mac에 직접 설치해서, 워크플로의 특정 job이 "GitHub 클라우드"가 아니라
+"이 Mac 자체"에서 실행되게 한다. 그러면 그 job 안에서는 `localhost:2222`로
+배포 서버에 바로 SSH 접속할 수 있다.
+
+(대안으로 ngrok/cloudflared 같은 터널을 배포 서버에 뚫어 클라우드 러너가
+접근하게 하는 방법도 있음 — 별도로 정리 예정)
+
+### 실제 실행 명령 (self-hosted runner 등록)
+```
+# 1. 러너 프로그램 다운로드 (arm64 Mac이므로 osx-arm64 패키지)
+mkdir -p ~/actions-runner-cicd-demo && cd ~/actions-runner-cicd-demo
+curl -o actions-runner-osx-arm64-2.337.0.tar.gz -L \
+  https://github.com/actions/runner/releases/download/v2.337.0/actions-runner-osx-arm64-2.337.0.tar.gz
+tar xzf ./actions-runner-osx-arm64-2.337.0.tar.gz
+
+# 2. GitHub에서 임시 등록 토큰 발급 (1시간 유효)
+gh api -X POST repos/felix-y-s/cicd-demo/actions/runners/registration-token --jq '.token'
+
+# 3. 러너를 이 저장소에 등록
+./config.sh --url https://github.com/felix-y-s/cicd-demo \
+  --token <위에서 받은 토큰> \
+  --name mac-local-runner \
+  --labels self-hosted,macOS,local-deploy \
+  --work _work --unattended
+
+# 4. 러너 실행 (백그라운드, "Listening for Jobs" 상태가 되면 대기 완료)
+nohup ./run.sh > runner.log 2>&1 &
+
+# 5. 등록 확인
+gh api repos/felix-y-s/cicd-demo/actions/runners --jq '.runners[] | {name, status}'
+# → {"name":"mac-local-runner","status":"online"}
+```
+
+### SSH 개인키를 GitHub Secrets에 등록
+워크플로가 어떤 러너에서 실행되든 동일하게 동작하도록(이식성), 로컬
+파일을 직접 참조하지 않고 Secrets로 관리:
+```
+cat ~/.ssh/cicd-demo-deploy | gh secret set DEPLOY_SSH_PRIVATE_KEY --repo felix-y-s/cicd-demo
+```
+
+### 워크플로에 추가한 것 (`.github/workflows/ci.yml`)
+`push-ghcr` job 뒤에 `deploy` job 추가:
+- `runs-on: self-hosted`, `needs: push-ghcr` — GHCR push 성공 후에만 실행
+- SSH 개인키를 Secrets에서 꺼내 임시 파일로 저장
+- SSH로 배포 서버 접속 → `docker pull` → 기존 `nest-app` 컨테이너 제거 →
+  새 이미지로 재기동 (4단계에서 손으로 쳤던 명령을 그대로 스크립트화)
+- `curl`로 헬스체크
+- `if: always()`로 개인키 임시 파일 정리 (성공/실패 무관하게 항상 실행)
+
+### push 전 로컬 사전 검증
+워크플로에 넣을 배포 스크립트를 실제로 터미널에서 먼저 실행해 재현 확인:
+```
+ssh -i ~/.ssh/cicd-demo-deploy -p 2222 \
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  deployer@localhost bash -s <<'EOF'
+  set -e
+  docker pull ghcr.io/felix-y-s/cicd-demo:latest
+  docker rm -f nest-app || true
+  docker run -d --name nest-app \
+    --add-host=host.docker.internal:192.168.65.254 \
+    --env-file /home/deployer/app.env \
+    -p 3000:3000 \
+    ghcr.io/felix-y-s/cicd-demo:latest
+EOF
+# → 기존 컨테이너 제거 후 재기동 성공
+
+sleep 5
+ssh ... deployer@localhost "curl -sf http://localhost:3000/ > /dev/null && echo 배포 성공"
+# → "배포 성공: 앱이 정상 응답함"
+```
+
+### 다음에 기록할 것
+- [ ] 실제 push 후 GitHub Actions에서 test → push-ghcr → deploy 전체가
+  자동으로 이어지는지 확인
+- [ ] self-hosted runner를 계속 켜둘지, 언제 꺼야 하는지 정리
+- [ ] ngrok/cloudflared 방식 별도 문서 작성

@@ -172,3 +172,45 @@ jobs:
           # 이전 빌드의 레이어 캐시를 GitHub Actions 캐시에서 재사용해 빌드 시간을 단축한다.
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    # self-hosted: 이 Mac에 등록해 둔 러너(mac-local-runner)에서 실행된다.
+    # GitHub의 클라우드 러너는 사설 IP인 로컬 배포 서버에 네트워크로 도달할
+    # 수 없어서, 배포 서버와 같은 네트워크(이 Mac)에 있는 러너가 필요하다.
+    runs-on: self-hosted
+    needs: push-ghcr
+
+    steps:
+      - name: SSH 개인키 준비
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: 배포 서버에서 최신 이미지 pull 및 재기동
+        # 4단계에서 터미널로 직접 실행했던 절차를 그대로 스크립트화:
+        # GHCR에서 새 이미지를 받아, 기존 컨테이너를 내리고 새로 띄운다.
+        run: |
+          ssh -i ~/.ssh/deploy_key -p 2222 \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            deployer@localhost bash -s <<'EOF'
+            set -e
+            docker pull ghcr.io/felix-y-s/cicd-demo:latest
+            docker rm -f nest-app || true
+            docker run -d --name nest-app \
+              --add-host=host.docker.internal:192.168.65.254 \
+              --env-file /home/deployer/app.env \
+              -p 3000:3000 \
+              ghcr.io/felix-y-s/cicd-demo:latest
+          EOF
+
+      - name: 배포 헬스체크
+        run: |
+          sleep 5
+          ssh -i ~/.ssh/deploy_key -p 2222 \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            deployer@localhost "curl -sf http://localhost:3000/ > /dev/null && echo '배포 성공: 앱이 정상 응답함'"
+
+      - name: SSH 개인키 정리
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
