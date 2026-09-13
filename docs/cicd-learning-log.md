@@ -342,12 +342,41 @@ docker build -t ghcr.io/felix-y-s/cicd-demo:latest \
 ```
 → 정상 빌드 확인 후 커밋.
 
-### 확인 필요 (push 후 점검할 것)
-- [ ] GHCR에 처음 push된 패키지는 기본적으로 **private**임. 5단계(배포
-  서버)에서 `docker pull`하려면 인증이 필요하거나 GitHub 저장소 설정에서
-  패키지를 public으로 전환해야 함 — 실제 push 후 확인 예정.
-- [ ] `docker/build-push-action`의 GHA 캐시(`cache-from/to: type=gha`)가
-  실제로 빌드 시간을 줄여주는지 두 번째 push부터 확인.
+### 실제 push 결과 (PR#1 merge 후)
+- `test`(1분 56초) → `push-ghcr`(3분 18초) 순서로 정상 실행, GHCR push 성공
+- 예상과 달리 **패키지가 이미 public 상태**였음 (별도 설정 불필요했음)
+
+### [트러블슈팅] arm64 환경에서 pull 실패
+
+로컬(Apple Silicon Mac, arm64)에서 방금 push된 이미지를 pull해봤더니:
+```
+Error response from daemon: no matching manifest for linux/arm64/v8
+in the manifest list entries: no match for platform in manifest: not found
+```
+
+**원인**: GitHub Actions의 `ubuntu-latest` 러너는 linux/amd64 아키텍처.
+`docker/build-push-action`에 `platforms`를 지정하지 않으면 러너의
+기본 아키텍처(amd64)로만 빌드되어, arm64 환경(Apple Silicon Mac 등)에서는
+매니페스트에 맞는 이미지가 없어 pull이 거부된다.
+
+**중요성**: 5단계(로컬 Linux 배포 서버)를 Mac 위 Docker 컨테이너로 만들
+계획인데, 이 컨테이너도 결국 호스트인 Mac의 아키텍처(arm64)를 쓰게 되므로
+이 문제를 미리 잡지 않으면 5단계에서 그대로 막히게 됨.
+
+**해결**: `build-push-action`에 `platforms: linux/amd64,linux/arm64`를
+추가하고, 크로스 컴파일에 필요한 `docker/setup-qemu-action`을 `setup-buildx-action`
+앞에 추가. 이러면 하나의 태그 아래 두 아키텍처 이미지가 매니페스트
+리스트로 묶여 push되고, pull하는 쪽의 아키텍처에 맞춰 자동 선택된다.
+
+**부수적으로 발견한 것**: 처음 작성했던 액션 버전(`docker/login-action@v3`,
+`metadata-action@v5`, `setup-buildx-action@v3`, `build-push-action@v6`)이
+전부 실제로는 각 저장소의 최신 메이저가 아니었음. GitHub API로 태그
+목록을 직접 조회해 최신 메이저(v4/v6/v4/v7)로 교체:
+```
+gh api repos/docker/build-push-action/tags --jq '.[].name' | grep -E '^v[0-9]+$'
+```
+IDE의 액션 버전 진단이 최신 태그를 "resolve 불가"로 표시했는데, 이는
+IDE 확장의 캐시 지연이었고 GitHub API로 태그 존재를 직접 검증하여 확인.
 
 ---
 
