@@ -1,0 +1,166 @@
+name: CI
+
+# main 브랜치로의 push와, main을 대상으로 하는 PR에서 실행
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # mongodb.integration.spec.ts, redis.integration.spec.ts,
+    # rabbitmq-connection.integration.spec.ts가 실제 서버 연결을 필요로
+    # 하므로(mock이 아니라 모듈을 실제로 부팅함), 4개 인프라를 전부
+    # 러너 안에 임시 컨테이너로 띄운다.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: nest
+          POSTGRES_PASSWORD: nest
+          POSTGRES_DB: nest_template
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      mongodb:
+        image: mongo:7
+        env:
+          MONGO_INITDB_ROOT_USERNAME: nest
+          MONGO_INITDB_ROOT_PASSWORD: nest
+          MONGO_INITDB_DATABASE: nest_template
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        # GitHub Actions의 services.options는 docker create 옵션만 받고
+        # 컨테이너 실행 커맨드(CMD)는 오버라이드할 수 없다. 그래서
+        # docker-compose.yml처럼 --requirepass로 비밀번호를 거는 것이
+        # 불가능해, CI에서는 인증 없는 기본 Redis로 띄운다.
+        # (RedisModule은 REDIS_PASSWORD가 비어 있으면 인증 없이 연결한다.)
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 6379:6379
+
+      rabbitmq:
+        image: rabbitmq:3-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: nest
+          RABBITMQ_DEFAULT_PASS: nest
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://nest:nest@localhost:5432/nest_template?schema=public
+      MONGODB_URI: mongodb://nest:nest@localhost:27017/nest_template?authSource=admin
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ''
+      RABBITMQ_URL: amqp://nest:nest@localhost:5672
+      JWT_SECRET: ci-test-only-32-characters-secret-key
+      JWT_REFRESH_SECRET: ci-test-only-32-characters-refresh-key
+      SWAGGER_ENABLED: 'false'
+
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: pnpm 설치
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - name: Node.js 설치 (pnpm 캐시 사용)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 의존성 설치
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint 검사
+        run: pnpm lint
+
+      - name: Prisma 마이그레이션 적용
+        run: npx prisma migrate deploy
+
+      - name: 테스트 실행
+        run: pnpm test
+
+      - name: 빌드
+        run: pnpm build
+
+      - name: Docker 이미지 빌드 검증
+        run: docker build -t nest-cicd-demo:ci .
+
+  push-ghcr:
+    runs-on: ubuntu-latest
+    # test job이 성공해야만 실행 (린트/테스트/빌드가 모두 통과한 코드만 배포 이미지로 만든다)
+    needs: test
+    # main 브랜치로의 push에서만 실행. PR에서는 빌드 검증만 하고 실제 push는 하지 않는다.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    # GITHUB_TOKEN으로 GHCR에 이미지를 push하려면 packages: write 권한이 필요하다.
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: GHCR 로그인
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # 별도로 발급받은 시크릿이 아니라, 워크플로 실행마다 GitHub가 자동
+          # 발급하는 임시 토큰. 위 permissions.packages: write 덕분에 push 권한을 가진다.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 이미지 메타데이터 추출 (태그/라벨)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short,prefix=sha-
+
+      - name: Docker Buildx 설정
+        uses: docker/setup-buildx-action@v3
+
+      - name: 빌드 및 GHCR push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 이전 빌드의 레이어 캐시를 GitHub Actions 캐시에서 재사용해 빌드 시간을 단축한다.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
