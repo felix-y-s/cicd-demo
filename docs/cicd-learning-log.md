@@ -310,7 +310,7 @@ PR: https://github.com/felix-y-s/cicd-demo/pull/1
 
 ---
 
-## 3단계: GHCR 이미지 배포 (진행 중)
+## 3단계: GHCR 이미지 배포 (완료)
 
 ### 무엇을 했나
 - 기존 `.github/workflows/ci.yml`에 `push-ghcr` job 추가 (별도 cd.yml로
@@ -377,6 +377,30 @@ gh api repos/docker/build-push-action/tags --jq '.[].name' | grep -E '^v[0-9]+$'
 ```
 IDE의 액션 버전 진단이 최신 태그를 "resolve 불가"로 표시했는데, 이는
 IDE 확장의 캐시 지연이었고 GitHub API로 태그 존재를 직접 검증하여 확인.
+
+### 최종 검증 (PR#2 merge 후)
+- CI 전체 성공: `test`(1분 46초) → `push-ghcr`(4분 24초, QEMU 크로스
+  빌드 포함이라 이전보다 오래 걸림)
+- 로컬(Apple Silicon Mac, arm64)에서 실제 pull 성공:
+  ```
+  docker pull ghcr.io/felix-y-s/cicd-demo:latest
+  docker inspect ... --format '{{.Architecture}}/{{.Os}}'  # → arm64/linux
+  ```
+- pull한 이미지로 컨테이너 기동 → 기존 인프라(postgres/mongodb/redis/
+  rabbitmq)에 정상 연결 → `curl http://localhost:3002/` → `200` 확인.
+  즉 "GitHub Actions가 빌드한 이미지가 실제 로컬 환경에서 그대로
+  동작한다"는 배포 파이프라인의 핵심 전제를 검증 완료.
+
+PR: https://github.com/felix-y-s/cicd-demo/pull/2
+
+### 3단계 전체 요약
+- GHCR push는 `GITHUB_TOKEN` + `permissions.packages: write`만으로 충분
+  (별도 시크릿 불필요)
+- 패키지는 예상과 달리 첫 push부터 이미 public 상태였음
+- **크로스 플랫폼 배포를 고려한다면 `platforms` 지정은 선택이 아니라
+  필수**임을 실제 실패로 체감 (CI 러너와 배포 대상의 아키텍처가 다를 수
+  있다는 걸 놓치면 "빌드는 성공했는데 배포 환경에서 pull이 안 되는"
+  상황이 생김)
 
 ---
 
