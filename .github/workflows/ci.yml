@@ -1,0 +1,79 @@
+name: CI
+
+# main 브랜치로의 push와, main을 대상으로 하는 PR에서 실행
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # 통합 테스트(prisma.integration.spec.ts 등)가 실제 PostgreSQL 연결을
+    # 필요로 하므로, 러너 안에 임시 PostgreSQL 컨테이너를 띄운다.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: nest
+          POSTGRES_PASSWORD: nest
+          POSTGRES_DB: nest_template
+        ports:
+          - 5432:5432
+        # 컨테이너가 완전히 기동될 때까지 기다리는 헬스체크
+        options: >-
+          --health-cmd "pg_isready -U nest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://nest:nest@localhost:5432/nest_template?schema=public
+      # MongoDB/Redis/RabbitMQ는 유닛 테스트에서 실제로 연결하지 않지만
+      # Joi validationSchema의 required() 검증을 통과시키기 위해 형식만 맞춘 더미 값을 준다.
+      MONGODB_URI: mongodb://nest:nest@localhost:27017/nest_template?authSource=admin
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: nest
+      RABBITMQ_URL: amqp://nest:nest@localhost:5672
+      JWT_SECRET: ci-test-only-32-characters-secret-key
+      JWT_REFRESH_SECRET: ci-test-only-32-characters-refresh-key
+      SWAGGER_ENABLED: 'false'
+
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: pnpm 설치
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - name: Node.js 설치 (pnpm 캐시 사용)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 의존성 설치
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint 검사
+        run: pnpm lint
+
+      - name: Prisma 마이그레이션 적용
+        run: npx prisma migrate deploy
+
+      - name: 테스트 실행
+        run: pnpm test
+
+      - name: 빌드
+        run: pnpm build
+
+      - name: Docker 이미지 빌드 검증
+        # 실제로 GHCR에 push하지는 않고, Dockerfile이 여전히 정상 빌드되는지만 검증한다.
+        # push는 3단계(GHCR 배포)에서 별도 job으로 추가할 예정.
+        run: docker build -t nest-cicd-demo:ci .
