@@ -409,9 +409,187 @@ PR: https://github.com/felix-y-s/cicd-demo/pull/2
   → 결론: CI 러너와 배포 대상의 아키텍처가 다를 수 있다는 걸 놓치면
   "빌드는 성공했는데 배포 환경에서 pull이 안 되는" 상황이 생긴다.
 
+### 개선 백로그 (지금 당장은 아니지만 기록해둘 것)
+- [ ] `on.push`에 `paths-ignore: ['docs/**']`를 추가해, 문서만 바뀐
+  커밋에서는 test/push-ghcr이 다시 돌지 않도록 하기. 지금은 `docs/`만
+  고쳐도 이미지가 불필요하게 재빌드/재push됨 (실제로 이번 세션에서
+  문서 수정 커밋 하나 때문에 GHCR push가 한 번 더 실행됨).
+
 ---
 
-## 4단계: (예정)
+## 4단계: 로컬 Linux 배포 서버 구축 (완료)
+
+### 이 단계에서 실제로 만든 파일 vs 터미널에서 직접 실행만 한 명령
+
+**파일로 만들어서 git에 남길 것들** (`deploy-server/` 디렉토리):
+- `deploy-server/Dockerfile` — "가짜 리눅스 서버" 이미지 정의
+- `deploy-server/entrypoint.sh` — 컨테이너 시작 시 dockerd/sshd 기동 스크립트
+- `deploy-server/authorized_keys` — SSH 접속을 허용할 공개키
+
+**아직 파일(스크립트)로 안 만들고, 터미널에 직접 쳐서 "되는지 안 되는지"만
+확인한 것** — 즉 지금은 자동화된 배포가 아니라 수동 리허설 단계다:
+- 아래 "실제 실행 명령 전체 기록" 참고. 5단계에서 이걸 스크립트나
+  GitHub Actions 워크플로로 옮겨 자동화할 예정.
+
+### 실제 실행 명령 전체 기록 (재현 가능하도록 그대로 남김)
+
+**1) 실습 전용 SSH 키 쌍 생성** (기존 개인 키와 분리, 최초 1회만)
+```
+ssh-keygen -t ed25519 -f ~/.ssh/cicd-demo-deploy -N "" -C "cicd-demo-deploy-practice"
+cp ~/.ssh/cicd-demo-deploy.pub deploy-server/authorized_keys
+```
+
+**2) "가짜 서버" 이미지 빌드**
+```
+cd deploy-server
+docker build -t local-linux-deploy-server .
+```
+
+**3) "가짜 서버" 컨테이너 실행** (SSH 포트를 호스트 2222번에 매핑)
+```
+docker run -d --name local-deploy-server --privileged \
+  --add-host=host.docker.internal:host-gateway \
+  -p 2222:22 \
+  local-linux-deploy-server
+```
+
+**4) SSH로 실제 접속해서 확인** (여기서부터 "명령어 뒤에 붙는 문자열"이
+전부 가짜 서버 안에서 실행됨)
+```
+ssh -i ~/.ssh/cicd-demo-deploy -p 2222 \
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  deployer@localhost "echo 접속 성공; whoami; hostname"
+# 결과: whoami → deployer, hostname → 06895f722a03 (가짜 서버 자신의 ID)
+# → Mac이 아니라 가짜 서버 안에서 실행됐다는 증거
+
+ssh ... deployer@localhost "docker --version && docker ps"
+# → 가짜 서버 "안에" Docker가 설치되어 있고 정상 동작함을 확인
+```
+
+**5) 가짜 서버 안에서 또 다른 컨테이너(alpine)를 띄워보는 테스트** (overlay
+에러 발견 → vfs로 수정 후 재검증, 아래 트러블슈팅 1 참고)
+```
+ssh ... deployer@localhost "docker run --rm alpine echo 중첩 컨테이너 실행 성공"
+```
+
+**6) DB 연결 경로 확인** (host.docker.internal 문제 진단, 트러블슈팅 2 참고)
+```
+ssh ... deployer@localhost "getent hosts host.docker.internal"
+ssh ... deployer@localhost "docker run --rm --add-host=host.docker.internal:192.168.65.254 \
+  alpine sh -c 'apk add --no-cache netcat-openbsd -q && nc -zv -w3 host.docker.internal 5432'"
+```
+
+**7) 실제 배포: GHCR에서 이미지 pull → NestJS 컨테이너 실행**
+```
+# env 파일을 SCP로 가짜 서버에 전송 (DB 접속 정보를 host.docker.internal로 지정)
+scp -i ~/.ssh/cicd-demo-deploy -P 2222 deploy.env deployer@localhost:/home/deployer/app.env
+
+ssh ... deployer@localhost "docker run -d --name nest-app \
+  --add-host=host.docker.internal:192.168.65.254 \
+  --env-file /home/deployer/app.env \
+  -p 3000:3000 \
+  ghcr.io/felix-y-s/cicd-demo:latest"
+
+ssh ... deployer@localhost "docker logs nest-app"
+# → PostgreSQL/RabbitMQ 연결 성공 로그 확인
+```
+
+**8) 외부(Mac)에서 최종 접근 확인** (SSH 터널, 트러블슈팅 3 참고)
+```
+ssh -i ~/.ssh/cicd-demo-deploy -p 2222 -f -N -L 3000:localhost:3000 deployer@localhost
+curl http://localhost:3000/
+# → HTTP 200
+```
+
+### 왜 Docker-in-Docker로 만들었나
+실제 배포 서버는 "SSH로 접속해서, 그 서버의 Docker로 이미지를 pull/run"
+하는 게 핵심 동작이다. 로컬에 진짜 VM이나 별도 리눅스 장비 없이 이
+경험을 재현하려면, 컨테이너 안에 독립된 Docker 데몬을 하나 더 띄우는
+Docker-in-Docker(DinD) 구조가 필요했다.
+
+### [트러블슈팅 1] overlay 마운트 실패
+
+`--privileged`로 배포 서버를 띄우고 그 안에서 `docker run alpine ...`을
+실행하니:
+```
+failed to mount ... fstype: overlay ... err: invalid argument
+```
+
+**원인**: Mac Docker Desktop은 이미 리눅스 VM 위에서 동작하는데, 그 안에
+또 격리된 Docker 데몬(overlay2 스토리지 드라이버 사용)을 얹으면 커널의
+overlay 파일시스템 계층이 중첩 가상화 환경에서 꼬이는 경우가 있다
+(Docker-in-Docker의 알려진 제약).
+
+**해결**: `entrypoint.sh`에서 `dockerd --storage-driver=vfs`로 시작하도록
+수정. vfs는 레이어를 하드링크 없이 통째로 복사하는 방식이라 속도는
+느리지만 커널 의존성이 낮아 중첩 가상화에서도 안정적으로 동작한다.
+재빌드 후 `docker run --rm alpine echo ...`가 정상 실행되는 것으로 확인.
+
+### [트러블슈팅 2] 중첩 컨테이너에서 host.docker.internal이 엉뚱한 곳을 가리킴
+
+DB 연결 테스트 중, nested 컨테이너(배포 서버 안에서 dockerd가 만든
+컨테이너)에서 `--add-host=host.docker.internal:host-gateway`를 써도
+PostgreSQL(호스트 Mac의 5432)에 연결이 안 됨.
+
+**원인 분석 (단계별로 직접 검증)**:
+1. 배포 서버 컨테이너 자신은 `host.docker.internal` → `192.168.65.254`
+   (Mac)로 정상 resolve됨. `/dev/tcp` 체크로 5432 접속도 성공.
+2. 그런데 그 안에서 `docker run`으로 만든 nested 컨테이너는
+   `host.docker.internal` → `172.18.0.1`로 resolve됨. 이건 Mac이 아니라
+   **nested dockerd가 만든 브릿지 네트워크의 게이트웨이, 즉 배포 서버
+   컨테이너 자기 자신**이었음. `nc`로 5432 접속 시도 시 "Connection
+   refused" (배포 서버 자신은 5432를 열고 있지 않으므로 당연한 결과).
+
+**핵심 개념**: `host.docker.internal`은 Docker Desktop이 "자신이 직접
+관리하는 최상위 컨테이너"에만 자동으로 심어주는 특수 DNS다. 그 컨테이너
+안에서 또 dockerd가 컨테이너를 만들면, 그 dockerd는 그냥 평범한 Linux
+Docker이므로 이 자동 매핑이 없다. `--add-host=...:host-gateway`도
+"이 컨테이너가 속한 네트워크의 게이트웨이"를 가리킬 뿐이라, 중첩
+단계마다 다른 대상을 가리키게 된다.
+
+**해결**: nested 컨테이너 실행 시 `host.docker.internal`을 배포 서버가
+확인한 실제 IP로 명시적으로 고정:
+```
+docker run --add-host=host.docker.internal:192.168.65.254 ...
+```
+이후 `nc -zv host.docker.internal 5432` → 성공 확인.
+
+### [트러블슈팅 3] 포트 매핑이 중첩 단계마다 필요함
+
+`nest-app`(nested 컨테이너)이 `-p 3000:3000`으로 자신을 배포 서버에
+노출해도, Mac에서 `curl http://localhost:3000/`이 실패함
+(`Exit code 7`, connection refused).
+
+**원인**: 배포 서버 컨테이너 자체를 처음 띄울 때 `-p 2222:22`(SSH)만
+열었고 `3000:3000`은 열지 않았음. 포트 노출은 각 중첩 레이어마다
+독립적으로 필요하다 — nested 컨테이너의 포트가 배포 서버에 노출돼도,
+배포 서버 자신의 포트가 Mac에 노출돼야 최종적으로 바깥에서 닿는다.
+
+**해결**: 배포 서버 컨테이너 자체를 재기동하지 않고, 이미 열려 있는
+SSH를 활용해 SSH 로컬 포트 포워딩으로 접근:
+```
+ssh -i ~/.ssh/cicd-demo-deploy -p 2222 -f -N -L 3000:localhost:3000 deployer@localhost
+curl http://localhost:3000/   # → 200
+```
+실제 운영에서도 배포 서버의 내부 포트를 확인할 때 SSH 터널을 쓰는
+경우가 흔해, 이 방식이 실습 목적에 맞다고 판단.
+
+### 최종 검증된 전체 흐름
+```
+GHCR (이미지 저장소)
+  → SSH로 배포 서버(컨테이너) 접속 (ssh -i ~/.ssh/cicd-demo-deploy -p 2222 deployer@localhost)
+  → 배포 서버 안에서 docker pull ghcr.io/felix-y-s/cicd-demo:latest
+  → docker run으로 컨테이너 기동
+  → 그 컨테이너가 host.docker.internal(고정 IP)을 통해
+    Mac 호스트의 PostgreSQL/MongoDB/Redis/RabbitMQ에 연결 성공
+  → SSH 로컬 포트 포워딩으로 외부에서 최종 접근 확인 (HTTP 200)
+```
+
+### 남은 정리 작업
+- [ ] `deploy-server/` 내용을 git에 커밋할지 결정 (실습용 인프라 코드이므로
+  포함 여부와 위치 재검토 필요 — `authorized_keys`는 공개키만이라 안전)
+- [ ] 5단계에서 이 배포 서버로 자동 배포(SSH + docker pull/run을 스크립트화
+  또는 GitHub Actions에서 SSH로 원격 실행)를 구성할 예정
 
 ---
 
