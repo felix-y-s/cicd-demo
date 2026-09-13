@@ -134,7 +134,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: GHCR 로그인
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -144,21 +144,29 @@ jobs:
 
       - name: 이미지 메타데이터 추출 (태그/라벨)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=latest
             type=sha,format=short,prefix=sha-
 
+      - name: QEMU 설정 (크로스 플랫폼 빌드용)
+        uses: docker/setup-qemu-action@v4
+
       - name: Docker Buildx 설정
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: 빌드 및 GHCR push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
+          # GitHub Actions 러너는 linux/amd64이지만, 배포 대상(Apple Silicon Mac
+          # 위의 로컬 Linux 컨테이너 등)은 linux/arm64일 수 있다. 두 아키텍처를
+          # 모두 매니페스트에 포함시켜 어떤 환경에서 pull하든 자동으로 맞는
+          # 아키텍처가 선택되게 한다.
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # 이전 빌드의 레이어 캐시를 GitHub Actions 캐시에서 재사용해 빌드 시간을 단축한다.
