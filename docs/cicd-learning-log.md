@@ -703,9 +703,31 @@ PR: https://github.com/felix-y-s/cicd-demo/pull/4
   GitHub 클라우드 러너는 사설 네트워크의 배포 서버에 도달할 수 없으므로,
   배포 서버와 같은 네트워크에 있는 컴퓨터(이 Mac)를 러너로 등록해야 했다.
 
+### [관찰] self-hosted runner의 online/offline 불안정성
+
+문서 커밋(`docs/deploy-alternatives-tunnel.md`)만 push했는데도 `main`
+push 트리거로 전체 파이프라인이 다시 돌았고, 이때 `deploy` job이
+5분 넘게 `queued` 상태로 멈춰 있었다. 원인 확인:
+```
+gh api repos/felix-y-s/cicd-demo/actions/runners --jq '.runners[] | {name, status, busy}'
+# → {"busy":false,"name":"mac-local-runner","status":"offline"}
+```
+러너 프로세스(`run.sh`, `Runner.Listener`) 자체는 `ps aux`로 확인해보니
+계속 살아있었고, 로그(`runner.log`)에도 직전 job까지는 정상 처리
+기록이 있었다. 즉 프로세스가 죽은 게 아니라 GitHub 쪽에 상태가 잠깐
+offline으로 잘못 보고된 것으로 보인다. 15초 후 재조회하니 다시
+`"status":"online","busy":true`로 돌아왔고 `deploy` job도 정상 완료됨.
+
+**교훈**: self-hosted runner를 `nohup`으로 띄워두는 방식은 GitHub과의
+heartbeat 연결이 일시적으로 끊기면 `queued` 상태로 오래 대기할 수 있다.
+지금은 재시도 없이 기다리니 자연 복구됐지만, 실무라면 러너를
+systemd/launchd 서비스로 등록해 자동 재시작되게 하거나, GitHub이
+제공하는 공식 서비스 등록 스크립트(`svc.sh install && svc.sh start`)를
+쓰는 게 안정적이다. 지금은 학습 목적상 `nohup`으로 충분하다고 판단해
+그대로 둠.
+
 ### 다음에 기록할 것 (남은 작업)
-- [ ] self-hosted runner를 계속 켜둘지, 언제 꺼야 하는지 정리 (지금은
-  `nohup ./run.sh`로 백그라운드 실행 중 — 터미널/Mac 재시작 시 관리 방법
-  검토 필요)
+- [ ] self-hosted runner를 `nohup` 대신 launchd 서비스로 등록해 안정성
+  높이기 (또는 실습이 끝나면 완전히 내리고 정리)
 - [x] ngrok/cloudflared 터널 방식을 self-hosted runner의 대안으로
   별도 문서에 정리 (사용자 요청) → [docs/deploy-alternatives-tunnel.md](./deploy-alternatives-tunnel.md)
