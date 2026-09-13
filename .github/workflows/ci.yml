@@ -117,17 +117,30 @@ jobs:
       - name: Docker 이미지 빌드 검증
         run: docker build -t nest-cicd-demo:ci .
 
-  push-ghcr:
-    runs-on: ubuntu-latest
-    # test job이 성공해야만 실행 (린트/테스트/빌드가 모두 통과한 코드만 배포 이미지로 만든다)
+  # 이미지 크기 최적화(prod-deps 스테이지)에서 pnpm dlx로 Prisma 네이티브
+  # 엔진을 실행하게 되면서, QEMU 에뮬레이션으로 돌리는 arm64 빌드가
+  # "Illegal instruction (core dumped)"로 크래시하는 문제가 생겼다.
+  # 에뮬레이션 대신 GitHub가 제공하는 네이티브 arm64 러너(ubuntu-24.04-arm)를
+  # 써서 각 아키텍처를 독립적으로 빌드하는 방식으로 전환한다.
+  # (이 저장소는 public이라 GitHub Actions 표준 러너가 무료로 무제한 제공된다.)
+  build-and-push:
     needs: test
-    # main 브랜치로의 push에서만 실행. PR에서는 빌드 검증만 하고 실제 push는 하지 않는다.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    # GITHUB_TOKEN으로 GHCR에 이미지를 push하려면 packages: write 권한이 필요하다.
     permissions:
       contents: read
       packages: write
+
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: 저장소 체크아웃
@@ -138,8 +151,57 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          # 별도로 발급받은 시크릿이 아니라, 워크플로 실행마다 GitHub가 자동
-          # 발급하는 임시 토큰. 위 permissions.packages: write 덕분에 push 권한을 가진다.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker Buildx 설정
+        uses: docker/setup-buildx-action@v4
+
+      - name: 아키텍처별 이미지 빌드 및 push (다이제스트만 우선 생성)
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          # 태그 없이 다이제스트로만 push한다. 최종 latest/sha 태그는
+          # merge-manifest job에서 두 다이제스트를 합쳐 붙인다.
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.suffix }}
+
+      - name: 다이제스트 아티팩트 저장
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.suffix }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  push-ghcr:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: 다이제스트 아티팩트 다운로드
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: GHCR 로그인
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 이미지 메타데이터 추출 (태그/라벨)
@@ -151,27 +213,21 @@ jobs:
             type=raw,value=latest
             type=sha,format=short,prefix=sha-
 
-      - name: QEMU 설정 (크로스 플랫폼 빌드용)
-        uses: docker/setup-qemu-action@v4
-
       - name: Docker Buildx 설정
         uses: docker/setup-buildx-action@v4
 
-      - name: 빌드 및 GHCR push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: true
-          # GitHub Actions 러너는 linux/amd64이지만, 배포 대상(Apple Silicon Mac
-          # 위의 로컬 Linux 컨테이너 등)은 linux/arm64일 수 있다. 두 아키텍처를
-          # 모두 매니페스트에 포함시켜 어떤 환경에서 pull하든 자동으로 맞는
-          # 아키텍처가 선택되게 한다.
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # 이전 빌드의 레이어 캐시를 GitHub Actions 캐시에서 재사용해 빌드 시간을 단축한다.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # amd64/arm64 각각 push된 다이제스트 두 개를 하나의 멀티플랫폼
+      # 매니페스트로 묶어 최종 태그(latest, sha-*)를 붙인다.
+      - name: 멀티플랫폼 매니페스트 생성 및 태그 부여
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+
+      - name: 최종 이미지 확인
+        run: |
+          docker buildx imagetools inspect ghcr.io/${{ github.repository }}:latest
 
   deploy:
     # self-hosted: 이 Mac에 등록해 둔 러너(mac-local-runner)에서 실행된다.
