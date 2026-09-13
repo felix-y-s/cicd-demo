@@ -150,7 +150,121 @@ install 레이어는 항상 캐시된다.
 
 ---
 
-## 2단계: (예정)
+## 2단계: GitHub Actions CI 워크플로 (완료)
+
+### 무엇을 했나
+- `.github/workflows/ci.yml` 작성: push(main)/PR(main) 시 자동 실행
+- 단계: 체크아웃 → pnpm 설치 → Node 설치(pnpm 캐시) → 의존성 설치 → lint →
+  Prisma 마이그레이션 적용 → 테스트 → 빌드 → Docker 이미지 빌드 검증
+- `feature/cicd-setup` 브랜치로 push → PR #1 생성 → 실제 CI 실행 및 통과 확인
+
+### 사전 조사에서 발견한 것
+- `pnpm test`를 로컬에서 그냥 돌렸더니 **5개 테스트 실패**
+  (`The table 'public.users' does not exist`).
+  원인: 로컬 PostgreSQL에 Prisma 마이그레이션이 아직 적용 안 된 상태였음.
+  → `npx prisma migrate deploy`로 해결. 이 경험 덕분에 CI 워크플로에도
+  "마이그레이션 적용" 단계를 반드시 넣어야 한다는 걸 먼저 알고 설계함.
+- 통합 테스트 파일은 2개뿐 (`prisma.integration.spec.ts`,
+  `users.repository.integration.spec.ts`) — 둘 다 PostgreSQL만 사용.
+  MongoDB/Redis/RabbitMQ는 유닛 테스트에서 실제 연결하지 않음.
+  → CI에는 PostgreSQL만 `services:`로 띄우고, 나머지는 Joi
+  validationSchema의 `required()` 통과용 더미 값만 env로 제공.
+
+  **근거 (직접 코드 확인)**:
+  | 인프라 | 실제 연결 테스트 | 방식 |
+  |---|---|---|
+  | PostgreSQL | 있음 | 실제 DB에 쿼리 실행 |
+  | Redis | 없음 | `redis.service.spec.ts`가 `vi.fn()`으로 만든 mock 객체를 주입 |
+  | RabbitMQ | 없음 | `event-publisher.service.spec.ts`도 mock 채널/커넥션 사용 |
+  | MongoDB | 없음 | Mongoose 관련 spec 파일 자체가 존재하지 않음 |
+
+  단위 테스트(mock으로 외부 의존성을 대체해 "내 로직"만 검증)와
+  통합 테스트(실제 인프라 연동 자체를 검증)의 차이가 그대로 드러난다.
+  이 프로젝트는 PostgreSQL만 통합 테스트가 있으므로 CI도 그만큼만
+  인프라를 띄우면 충분하다. **나중에 Mongo/Redis/RabbitMQ 통합 테스트를
+  추가하게 되면, 그때는 `services:` 블록에 해당 이미지를 추가해야 한다**
+  (예: `mongo:7`, `redis:7-alpine`, `rabbitmq:3-management-alpine`).
+
+### 왜 이렇게 설계했나
+- **`services:` 블록**: GitHub Actions 러너는 매번 새 가상머신이라 로컬의
+  `docker-compose` 인프라가 없다. `services:`로 워크플로 실행 중에만
+  존재하는 임시 컨테이너(PostgreSQL)를 띄우고, `options`의 헬스체크로
+  DB가 준비될 때까지 기다린 뒤 다음 스텝이 진행되게 함.
+- **마이그레이션을 테스트보다 먼저**: 신선한 DB이므로 테이블이 없다.
+  로컬에서 이미 한 번 겪은 문제(`The table does not exist`)를 CI 설계에
+  미리 반영.
+- **Docker build를 마지막 단계로 포함**: 아직 GHCR에 push는 안 하지만,
+  "이 커밋의 코드가 Dockerfile로 정상 빌드되는가"까지 CI가 검증하게 해서
+  1단계(컨테이너화)와 2단계(CI)가 항상 함께 깨지지 않도록 연결.
+
+### 검증 방법 (push 전에 로컬로 먼저 재현)
+GitHub Actions 워크플로가 실제로 통과할지 push 전에 확신하기 위해,
+**완전히 새로운 PostgreSQL 컨테이너**(포트 5433, 빈 DB)를 하나 더 띄워서
+CI와 동일한 순서(마이그레이션 → lint → test)를 로컬에서 그대로 재현.
+→ 신선한 DB에서도 마이그레이션 적용 및 121개 테스트 전부 통과 확인 후 push.
+
+### 실제 CI 실행 결과
+- PR: https://github.com/felix-y-s/cicd-demo/pull/1
+- 실행 시간: 1분 28초
+- 모든 단계 성공 (체크아웃 ~ Docker 이미지 빌드 검증까지 전부 ✓)
+- 경고 1건 (기능에 영향 없음): 사용 중인 액션들(`actions/checkout@v4`,
+  `actions/setup-node@v4`, `pnpm/action-setup@v4`)이 Node.js 20 기반인데,
+  GitHub Actions 러너가 Node 20 지원을 종료하면서 Node 24로 강제 실행됨.
+  당장 동작엔 문제없지만 액션 버전을 최신으로 유지할 필요가 있다는 신호.
+
+### 남은 선택지 (다음 단계 진행 전 결정 필요)
+- [ ] 이미지 크기 최적화 (`pnpm deploy` 등으로 devDependencies 제거)
+- [ ] 3단계: CI 통과 시 GHCR에 이미지 push하는 워크플로(CD) 추가
+
+### [업데이트] MongoDB/Redis/RabbitMQ 통합 테스트 추가에 따른 CI 확장
+
+사용자가 `mongodb.integration.spec.ts`, `redis.integration.spec.ts`,
+`rabbitmq-connection.integration.spec.ts`를 새로 추가함. 세 파일 다
+mock이 아니라 **실제 모듈(`MongodbModule`, `RedisModule.forRoot()`,
+`RabbitMQModule`)을 부팅해서 진짜 서버에 연결**하는 방식으로 확인됨
+(예: Redis는 실제 SET/GET/INCR/TTL을 실행, RabbitMQ는 실제 채널 풀
+생성까지 검증). 위에서 "PostgreSQL만 있으면 된다"고 판단했던 근거
+자체가 바뀌었으므로 CI의 `services:`도 4개로 확장.
+
+**겪은 문제와 해결**
+
+1. **Redis에 비밀번호(`--requirepass`)를 걸 수 없음**
+   - 시도: `docker-compose.yml`처럼 `--entrypoint "redis-server
+     --requirepass nest"`를 `services.redis.options`에 지정.
+   - 실패 원인: Docker의 `--entrypoint`는 공백을 포함한 명령 전체가
+     아니라 **단일 실행 파일 경로만** 받는다. 로컬에서
+     `docker run --entrypoint "redis-server --requirepass nest" ...`로
+     재현했더니 `exec: "redis-server --requirepass nest": executable
+     file not found`로 즉시 실패.
+   - 근본 원인: GitHub Actions의 `services.<name>.options`는
+     `docker create`에 붙는 **옵션 문자열**만 받을 뿐, 컨테이너 실행
+     커맨드(CMD)를 통째로 바꿀 방법이 없다. `docker run <image>
+     <command>`처럼 이미지 뒤에 커맨드를 붙이는 것과는 다른 경로.
+   - 해결: CI에서는 인증 없는 기본 Redis로 띄우고
+     (`REDIS_PASSWORD: ''`), `RedisModule.forRoot()`가
+     `password: undefined`면 인증 없이 연결하는 걸 코드로 확인 후 적용.
+     통합 테스트가 검증하는 건 "SET/GET/INCR가 동작하는가"이지
+     "비밀번호 인증"이 아니므로 CI 목적엔 문제 없음.
+
+2. **포트 충돌로 로컬 검증이 처음엔 실패**
+   - 로컬에 이미 `docker-compose`로 postgres/mongodb/redis/rabbitmq가
+     떠 있어 표준 포트(5432/27017/6379/5672/15672)가 이미 점유됨.
+   - 해결: 검증용 컨테이너는 다른 포트(15432/27018/16379/15673)로
+     띄우고, env 값도 그 포트에 맞춰 임시로 지정해서 재현.
+
+**검증 절차**: push 전에 4개 인프라(Postgres/Mongo/Redis/RabbitMQ)를
+로컬 컨테이너로 새로 띄우고, CI와 동일한 순서(마이그레이션 → lint →
+test)로 재현. → **19개 테스트 파일, 131개 테스트 전부 통과** 확인 후 커밋.
+
+핵심 교훈: `services:`의 `options`가 받는 것은 "컨테이너를 만들 때 줄 수
+있는 옵션"이지 "컨테이너 안에서 실행할 명령"이 아니다. 이미지의 실행
+방식(엔트리포인트/커맨드)까지 바꿔야 하는 설정(비밀번호 강제 등)은
+`services:`로 재현하기 어렵고, 이럴 땐 이미지 기본 동작에 맞춰 테스트
+전략을 조정하는 편이 실용적이다.
+
+---
+
+## 3단계: (예정)
 
 ---
 

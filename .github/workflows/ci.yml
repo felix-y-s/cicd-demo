@@ -11,8 +11,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
-    # 통합 테스트(prisma.integration.spec.ts 등)가 실제 PostgreSQL 연결을
-    # 필요로 하므로, 러너 안에 임시 PostgreSQL 컨테이너를 띄운다.
+    # mongodb.integration.spec.ts, redis.integration.spec.ts,
+    # rabbitmq-connection.integration.spec.ts가 실제 서버 연결을 필요로
+    # 하므로(mock이 아니라 모듈을 실제로 부팅함), 4개 인프라를 전부
+    # 러너 안에 임시 컨테이너로 띄운다.
     services:
       postgres:
         image: postgres:16-alpine
@@ -22,9 +24,50 @@ jobs:
           POSTGRES_DB: nest_template
         ports:
           - 5432:5432
-        # 컨테이너가 완전히 기동될 때까지 기다리는 헬스체크
         options: >-
           --health-cmd "pg_isready -U nest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      mongodb:
+        image: mongo:7
+        env:
+          MONGO_INITDB_ROOT_USERNAME: nest
+          MONGO_INITDB_ROOT_PASSWORD: nest
+          MONGO_INITDB_DATABASE: nest_template
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        # GitHub Actions의 services.options는 docker create 옵션만 받고
+        # 컨테이너 실행 커맨드(CMD)는 오버라이드할 수 없다. 그래서
+        # docker-compose.yml처럼 --requirepass로 비밀번호를 거는 것이
+        # 불가능해, CI에서는 인증 없는 기본 Redis로 띄운다.
+        # (RedisModule은 REDIS_PASSWORD가 비어 있으면 인증 없이 연결한다.)
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 6379:6379
+
+      rabbitmq:
+        image: rabbitmq:3-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: nest
+          RABBITMQ_DEFAULT_PASS: nest
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -32,12 +75,10 @@ jobs:
     env:
       NODE_ENV: test
       DATABASE_URL: postgresql://nest:nest@localhost:5432/nest_template?schema=public
-      # MongoDB/Redis/RabbitMQ는 유닛 테스트에서 실제로 연결하지 않지만
-      # Joi validationSchema의 required() 검증을 통과시키기 위해 형식만 맞춘 더미 값을 준다.
       MONGODB_URI: mongodb://nest:nest@localhost:27017/nest_template?authSource=admin
       REDIS_HOST: localhost
       REDIS_PORT: 6379
-      REDIS_PASSWORD: nest
+      REDIS_PASSWORD: ''
       RABBITMQ_URL: amqp://nest:nest@localhost:5672
       JWT_SECRET: ci-test-only-32-characters-secret-key
       JWT_REFRESH_SECRET: ci-test-only-32-characters-refresh-key
