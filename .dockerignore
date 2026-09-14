@@ -11,3 +11,6 @@ tsconfig.build.tsbuildinfo
 coverage
 test
 *.md
+docs
+.github
+deploy-server
