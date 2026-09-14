@@ -6,6 +6,14 @@
 워크플로에 등장한 것만 다룬다.
 
 ---
+**Docker에서 이미지를 가리키는 방법**
+```
+ghcr.io/felix-y-s/cicd-demo                              # 이름만 (태그 없음, 암묵적으로 :latest)
+ghcr.io/felix-y-s/cicd-demo:latest                        # 태그 형태
+ghcr.io/felix-y-s/cicd-demo@sha256:3a4f1c...               # 다이제스트 형태
+ghcr.io/felix-y-s/cicd-demo:latest@sha256:3a4f1c...        # 태그 + 다이제스트 (정규화된 형태)
+```
+---
 
 ## 1. 워크플로 최상위 구조
 
@@ -119,17 +127,17 @@ build-and-push:
 GitHub Actions에서 정적 텍스트가 아니라 **동적으로 계산된 값**을 쓰고
 싶을 때는 항상 `${{ ... }}`로 감싼다. 이 워크플로에 등장한 것들:
 
-| 표현식 | 의미 |
-|---|---|
-| `${{ matrix.runner }}` | 현재 matrix 조합의 `runner` 값 |
-| `${{ matrix.platform }}` | 현재 matrix 조합의 `platform` 값 |
-| `${{ matrix.suffix }}` | 현재 matrix 조합의 `suffix` 값 |
-| `${{ github.actor }}` | 이 워크플로를 트리거한 사용자(계정명) |
-| `${{ github.repository }}` | `owner/repo` 형태의 저장소 전체 이름 |
-| `${{ secrets.GITHUB_TOKEN }}` | 매 실행마다 자동 발급되는 임시 토큰 |
-| `${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}` | 직접 등록한 저장소 Secret |
-| `${{ steps.build.outputs.digest }}` | 이전 스텝(`id: build`)이 출력한 값 |
-| `${{ steps.meta.outputs.tags }}` | 이전 스텝(`id: meta`)이 출력한 값 |
+| 표현식 | 의미 | 예시 값 |
+|---|---|---|
+| `${{ matrix.runner }}` | 현재 matrix 조합의 `runner` 값 | `ubuntu-24.04-arm` |
+| `${{ matrix.platform }}` | 현재 matrix 조합의 `platform` 값 | `linux/arm64` |
+| `${{ matrix.suffix }}` | 현재 matrix 조합의 `suffix` 값 | `arm64` |
+| `${{ github.actor }}` | 이 워크플로를 트리거한 사용자(계정명) | `felix-y-s` |
+| `${{ github.repository }}` | `owner/repo` 형태의 저장소 전체 이름 | `felix-y-s/cicd-demo` |
+| `${{ secrets.GITHUB_TOKEN }}` | 매 실행마다 자동 발급되는 임시 토큰 | `ghs_xxxxxxxxxxxxxxxxxxxx` |
+| `${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}` | 직접 등록한 저장소 Secret | `-----BEGIN OPENSSH PRIVATE KEY-----...` |
+| `${{ steps.build.outputs.digest }}` | 이전 스텝(`id: build`)이 출력한 값 | `sha256:3a4f1c...` |
+| `${{ steps.meta.outputs.tags }}` | 이전 스텝(`id: meta`)이 출력한 값 | `ghcr.io/felix-y-s/cicd-demo:latest`<br>`ghcr.io/felix-y-s/cicd-demo:sha-1a2b3c4` |
 
 `steps.<id>.outputs.<name>` 형태는, 어떤 스텝이 `id:`를 갖고 있고 그
 액션(또는 스크립트)이 표준 출력 메커니즘으로 값을 내보낼 때 뒤따르는
@@ -219,12 +227,94 @@ runs-on: ${{ matrix.runner }}
 
 ---
 
-## 8. job 사이에 파일 전달: `upload-artifact` / `download-artifact`
+## 8. `docker/build-push-action`의 `outputs`/`cache-*` — 다이제스트만 push하고 캐시를 분리하기
+
+```yaml
+- name: 아키텍처별 이미지 빌드 및 push (다이제스트만 우선 생성)
+  id: build
+  uses: docker/build-push-action@v7
+  with:
+    context: .
+    platforms: ${{ matrix.platform }}
+    push: true
+    # 태그 없이 다이제스트로만 push한다. 최종 latest/sha 태그는
+    # push-ghcr job에서 두 다이제스트를 합쳐 붙인다.
+    outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+    cache-from: type=gha,scope=${{ matrix.suffix }}
+    cache-to: type=gha,mode=max,scope=${{ matrix.suffix }}
+```
+
+이 스텝은 §7의 matrix로 나뉜 job(`build-and-push`)이 각 아키텍처를 빌드할
+때 쓰인다. 한 아키텍처만 빌드하는 job이 GHCR에 곧바로 `latest` 태그를
+붙여버리면, 다른 아키텍처 빌드가 아직 안 끝났는데 절반짜리(단일
+아키텍처) 이미지가 그 태그로 노출되는 순간이 생긴다. 그래서 이 단계는
+**태그를 붙이지 않고 다이제스트로만** 이미지를 올려 두고, 최종 태그
+부여는 두 빌드가 모두 끝난 뒤 `push-ghcr` job(§9에서 다이제스트를
+전달받아 §13의 `docker buildx imagetools create`로 매니페스트를
+합치는 job)에서 한 번에 한다.
+
+- `platforms: ${{ matrix.platform }}`: matrix 조합 하나당 **단일**
+  아키텍처만 빌드한다 (§7과 달리 여기는 콤마로 여러 개를 나열하지 않음
+  — 이미 job 자체가 아키텍처별로 나뉘어 있으므로).
+
+- `outputs`: 이 액션이 결과물을 어떻게 내보낼지 세부 지정하는 옵션.
+  쉼표로 구분된 키=값 목록:
+  - `type=image`: 이미지 형태로 내보낸다.
+  - `name=ghcr.io/${{ github.repository }}`: 어느 저장소 이름으로
+    push할지 (아직 태그는 없음, 저장소 이름까지만).
+  - `push-by-digest=true`: 태그가 아니라 **다이제스트(sha256 해시)**로만
+    레지스트리에 push한다. 이러면 `latest` 같은 사람이 읽는 태그가
+    이 시점엔 전혀 생기지 않는다.
+  - `name-canonical=true`: 출력되는 이미지 참조에 다이제스트를 포함한
+    정규화된 형태를 쓰도록 강제 — 다음 스텝에서 `steps.build.outputs.digest`
+    (§5)로 정확한 다이제스트 값을 꺼낼 수 있게 해준다.
+  - `push=true`: 빌드를 실행 중인 러너(VM) 안에 이미지를 만들고
+    끝내는 게 아니라, 실제로 레지스트리(GHCR)까지 push한다.
+- `cache-from`/`cache-to`: 이전 빌드의 레이어 캐시를 GitHub Actions
+  캐시 저장소에서 읽고(`cache-from`) 쓴다(`cache-to`). `scope:
+  ${{ matrix.suffix }}`를 붙인 이유는, amd64와 arm64가 **같은 워크플로
+  안에서 동시에** 캐시를 쓰고 쓰기 때문이다. scope 없이 캐시를 공유하면
+  서로 다른 아키텍처의 빌드 레이어가 뒤섞여 캐시가 오염될 수 있어,
+  `amd64`/`arm64` 스코프로 캐시 공간 자체를 분리했다.
+  `mode=max`는 중간 빌드 스테이지(멀티스테이지 Dockerfile의 `deps`,
+  `builder` 등)의 레이어까지 전부 캐시하라는 뜻 — 기본값(`mode=min`)은
+  최종 이미지 레이어만 캐시해서 재사용 폭이 좁다.
+
+```mermaid
+flowchart TD
+    A["strategy.matrix"] --> B["조합 1:<br/>platform=linux/amd64<br/>runner=ubuntu-latest"]
+    A --> C["조합 2:<br/>platform=linux/arm64<br/>runner=ubuntu-24.04-arm"]
+    B --> D["job 인스턴스 #1<br/>(amd64 러너에서 실행)"]
+    C --> E["job 인스턴스 #2<br/>(arm64 러너에서 실행)"]
+    D --> F["이 안에서<br/>matrix.platform = linux/amd64 하나뿐"]
+    E --> G["이 안에서<br/>matrix.platform = linux/arm64 하나뿐"]
+```
+```
+  strategy:
+    matrix:
+      include:
+        - platform: linux/amd64
+          runner: ubuntu-latest
+        - platform: linux/arm64
+          runner: ubuntu-24.04-arm
+  ```
+---
+
+## 9. job 사이에 파일 전달: `upload-artifact` / `download-artifact`
 
 matrix로 나뉜 두 job(`build-and-push`)의 결과물을, 그 다음 job
 (`push-ghcr`)에서 합쳐야 했다. job은 서로 다른 러너(가상머신)에서
 실행되므로 파일시스템을 공유하지 않는다 — 그래서 "아티팩트"라는
 메커니즘으로 파일을 주고받는다.
+
+아래 예시의 `/tmp/digests`는 세 job(amd64용, arm64용, `push-ghcr`용)
+모두에서 동일한 경로 문자열이지만, 실제로는 **매번 새로 뜨는 별개의
+러너 VM 안의 로컬 경로**다. amd64 VM과 arm64 VM은 각자의 `/tmp/digests`에
+파일을 쓴 뒤 아티팩트로 업로드하고 나면 VM째로 사라지고, `push-ghcr`
+job은 또 다른 새 VM에서 그 아티팩트들을 다운로드해 자신의
+`/tmp/digests`에 풀어놓는 것이다. 즉 같은 경로처럼 보여도 물리적으로는
+세 개의 다른 디스크 위치이며, 아티팩트 업로드/다운로드가 그 사이를
+이어주는 유일한 통로다.
 
 **올리는 쪽 (`build-and-push`, matrix로 2번 실행됨)**
 ```yaml
@@ -269,7 +359,7 @@ matrix로 나뉜 두 job(`build-and-push`)의 결과물을, 그 다음 job
 
 ---
 
-## 9. `permissions` — GITHUB_TOKEN의 권한 범위 지정
+## 10. `permissions` — GITHUB_TOKEN의 권한 범위 지정
 
 ```yaml
 permissions:
@@ -287,7 +377,7 @@ permissions:
 
 ---
 
-## 10. `uses` vs `run` — 액션을 쓸지, 셸 명령을 쓸지
+## 11. `uses` vs `run` — 액션을 쓸지, 셸 명령을 쓸지
 
 ```yaml
 - name: 저장소 체크아웃
@@ -307,7 +397,7 @@ permissions:
 
 ---
 
-## 11. `working-directory` — 특정 스텝의 실행 위치 지정
+## 12. `working-directory` — 특정 스텝의 실행 위치 지정
 
 ```yaml
 - name: 멀티플랫폼 매니페스트 생성 및 태그 부여
@@ -326,7 +416,7 @@ permissions:
 
 ---
 
-## 12. 여러 줄 셸 스크립트 안에서 워크플로 컨텍스트 값을 함께 쓰기
+## 13. 여러 줄 셸 스크립트 안에서 워크플로 컨텍스트 값을 함께 쓰기
 
 ```yaml
 run: |
