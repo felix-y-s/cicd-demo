@@ -127,7 +127,9 @@ jobs:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
+      # 저장소의 소스 코드 및 파일에 대한 읽기(Read) 권한을 부여
       contents: read
+      # GitHub Packages(GHCR, GitHub Container Registry)에 대한 쓰기(Write/Push) 권한을 부여
       packages: write
 
     strategy:
@@ -147,18 +149,18 @@ jobs:
         uses: actions/checkout@v4
 
       - name: GHCR 로그인
-        uses: docker/login-action@v4
+        uses: docker/login-action@v4 
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Docker Buildx 설정
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v4 # <--- [준비] Buildx 빌더 엔진을 가상 머신에 셋팅
 
       - name: 아키텍처별 이미지 빌드 및 push (다이제스트만 우선 생성)
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7 # <--- [실제 실행] 전달받은 코드로 Docker 이미지를 빌드 및 푸쉬
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -216,7 +218,7 @@ jobs:
       - name: Docker Buildx 설정
         uses: docker/setup-buildx-action@v4
 
-      # amd64/arm64 각각 push된 다이제스트 두 개를 하나의 멀티플랫폼
+      # amd64/arm64 각각 push된 다이제스트 **두 개를 하나**의 멀티플랫폼
       # 매니페스트로 묶어 최종 태그(latest, sha-*)를 붙인다.
       - name: 멀티플랫폼 매니페스트 생성 및 태그 부여
         working-directory: /tmp/digests
@@ -225,6 +227,7 @@ jobs:
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
 
+      # GitHub Actions 빌드 로그 확인용 (Human Verification)
       - name: 최종 이미지 확인
         run: |
           docker buildx imagetools inspect ghcr.io/${{ github.repository }}:latest
