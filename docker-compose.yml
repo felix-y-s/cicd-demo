@@ -1,4 +1,33 @@
 services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - '3000:3000'
+    volumes:
+      - .:/app
+      - /app/node_modules    # 컨테이너 내부 node_modules는 덮어쓰지 않도록 보호
+    env_file: .env
+    # .env의 DATABASE_URL 등은 localhost 기준(호스트에서 pnpm start:dev 실행 시 사용).
+    # app이 컨테이너로 뜨면 컨테이너 안의 localhost는 app 자신을 가리키므로,
+    # 같은 compose 네트워크 안에서는 서비스명(postgres, mongodb, redis, rabbitmq)이
+    # 곧 호스트명이 된다 — 아래 environment로 .env 값을 덮어써 접속 대상을 바꾼다.
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nest}:${POSTGRES_PASSWORD:-nest}@postgres:5432/${POSTGRES_DB:-nest_template}?schema=public
+      MONGODB_URI: mongodb://${MONGO_USER:-nest}:${MONGO_PASSWORD:-nest}@mongodb:27017/${MONGO_DB:-nest_template}?authSource=admin
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-nest}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-nest}:${RABBITMQ_PASSWORD:-nest}@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
   postgres:
     image: postgres:16-alpine
     container_name: nest-template-postgres

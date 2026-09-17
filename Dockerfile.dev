@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1
+
+# 개발용 이미지 — 단일 스테이지로 구성한다.
+# 운영용 Dockerfile과 달리 devDependencies가 그대로 필요하고
+# (nest start --watch가 @nestjs/cli devDependency를 사용),
+# 소스 코드는 docker-compose의 볼륨 마운트로 덮어써서 핫 리로드를 쓰는 것을
+# 전제로 하므로 멀티스테이지로 최종 이미지를 슬림화할 이유가 없다.
+FROM node:22-alpine AS development
+WORKDIR /app
+
+RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
+
+COPY package.json pnpm-lock.yaml ./
+COPY prisma ./prisma
+COPY prisma.config.ts ./
+
+# devDependencies까지 전부 설치 (--frozen-lockfile로 lockfile 불일치 시 빌드 실패)
+RUN pnpm install --frozen-lockfile
+
+COPY . .
+
+ENV NODE_ENV=development
+
+EXPOSE 3000
+
+# --watch: 소스 변경 감지 시 자동 재시작 (ts-node/tsc 워치 모드)
+CMD ["pnpm", "start:dev"]
