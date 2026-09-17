@@ -478,19 +478,43 @@ ssh ... deployer@localhost "docker --version && docker ps"
 에러 발견 → vfs로 수정 후 재검증, 아래 트러블슈팅 1 참고)
 ```
 ssh ... deployer@localhost "docker run --rm alpine echo 중첩 컨테이너 실행 성공"
+# SSH로 배포 서버에 접속해, 그 서버 "안의" dockerd로 alpine 컨테이너를
+# 하나 띄워 echo만 실행하고 종료시키는 명령. --rm으로 실행 후 컨테이너를
+# 즉시 삭제한다. 목적은 이미지 pull이 아니라 "중첩된 dockerd가 컨테이너를
+# 정상적으로 뜨울 수 있는가"만 확인하는 것 (아래 트러블슈팅 1 참고)
 ```
 
 **6) DB 연결 경로 확인** (host.docker.internal 문제 진단, 트러블슈팅 2 참고)
 ```
 ssh ... deployer@localhost "getent hosts host.docker.internal"
+# getent hosts: /etc/hosts와 DNS를 모두 뒤져 특정 호스트명이 어떤 IP로
+# 풀리는지 조회하는 명령. 여기서는 배포 서버 컨테이너 "자신의 관점"에서
+# host.docker.internal이 어느 IP를 가리키는지 확인하는 용도
+
 ssh ... deployer@localhost "docker run --rm --add-host=host.docker.internal:192.168.65.254 \
   alpine sh -c 'apk add --no-cache netcat-openbsd -q && nc -zv -w3 host.docker.internal 5432'"
+# --add-host=host.docker.internal:192.168.65.254: 이 nested 컨테이너의
+#   /etc/hosts에 host.docker.internal → 192.168.65.254를 강제로 등록.
+#   이 IP는 Mac의 실제 LAN IP(ifconfig로 보이는 것)가 아니라, Docker
+#   Desktop이 띄우는 내부 리눅스 VM 안에서 Mac 호스트를 가리키도록
+#   자동 구성한 가상 게이트웨이 주소다. 배포 서버 컨테이너까지는 이
+#   주소가 host.docker.internal로 자동 매핑되지만, 그 안에서 또 만든
+#   nested 컨테이너는 이 자동 매핑이 없어 수동으로 지정해야 한다
+# apk add --no-cache netcat-openbsd -q: alpine 기본 이미지엔 nc가 없어
+#   임시로 설치 (--no-cache로 설치 후 캐시 안 남김, -q는 조용히 설치)
+# nc -zv -w3 host.docker.internal 5432: -z는 데이터 전송 없이 포트만
+#   스캔, -v는 결과를 상세 출력, -w3은 3초 타임아웃. 즉 "5432 포트가
+#   열려 있고 접속 가능한가"만 확인하는 TCP 연결 테스트
 ```
 
 **7) 실제 배포: GHCR에서 이미지 pull → NestJS 컨테이너 실행**
 ```
 # env 파일을 SCP로 가짜 서버에 전송 (DB 접속 정보를 host.docker.internal로 지정)
 scp -i ~/.ssh/cicd-demo-deploy -P 2222 deploy.env deployer@localhost:/home/deployer/app.env
+# scp: SSH 프로토콜을 이용해 로컬 파일을 원격지로 복사하는 명령.
+#   -i로 인증에 쓸 개인키 지정, -P(대문자)로 SSH 포트 지정(소문자 -p는
+#   scp에서 다른 의미로 쓰이므로 대문자를 씀). 로컬의 deploy.env 파일을
+#   배포 서버의 /home/deployer/app.env 경로로 그대로 전송
 
 ssh ... deployer@localhost "docker run -d --name nest-app \
   --add-host=host.docker.internal:192.168.65.254 \

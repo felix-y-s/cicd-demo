@@ -2,8 +2,11 @@ name: CI
 
 # main 브랜치로의 push와, main을 대상으로 하는 PR에서 실행
 on:
+  # main 브랜치로 푸쉬 될때 트리거
   push:
     branches: [main]
+    
+  # main을 대상으로 PR을 만들때 + PR이 main을 대상으로 열려 있는 동안 코드가 바뀔 때마다 트리거
   pull_request:
     branches: [main]
 
@@ -125,6 +128,8 @@ jobs:
   # (이 저장소는 public이라 GitHub Actions 표준 러너가 무료로 무제한 제공된다.)
   build-and-push:
     needs: test
+    # main 브랜치로 푸쉬되는 경우(PR 머지 포함)가 아니면 이 잡(build-and-push)은 여기서 멈춘다.
+    # github.ref는 브랜치면 refs/heads/{브랜치명}, 태그면 refs/tags/{태그명} 형태를 가진다
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       # 저장소의 소스 코드 및 파일에 대한 읽기(Read) 권한을 부여
@@ -171,12 +176,20 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.suffix }}
           cache-to: type=gha,mode=max,scope=${{ matrix.suffix }}
 
+      # 현재 실행 중인 러너(runner) VM의 로컬 파일시스템
+      # 예: /tmp/digests/abcd1234라는 이름의 내용 없는 파일 하나가 생성
+      # ☝️ matrix 전략이라 amd64/arm64 각각 **별도 러너에서 독립 실행 중**이라는 점이 중요
       - name: 다이제스트 아티팩트 저장
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
+        # 동작 예시
+        # digest="sha256:abcd1234efgh5678"
+        # echo "${digest#sha256:}"
+        # 결과: abcd1234efgh5678 (sha256:이라는 접두어(prefix)를 제거)
 
+      #  /tmp/digests/의 파일들을 러너 밖의 GitHub이 관리하는 영구(단기) 저장소로 업로드
       - uses: actions/upload-artifact@v4
         with:
           name: digests-${{ matrix.suffix }}
@@ -192,12 +205,13 @@ jobs:
       packages: write
 
     steps:
+      # build-and-push job에서 올린 임시 파일들을 /tmp/digests 에 다운로드
       - name: 다이제스트 아티팩트 다운로드
         uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
-          pattern: digests-*
-          merge-multiple: true
+          pattern: digests-* # digests-amd64, digests-arm64
+          merge-multiple: true # /tmp/digests/<amd64 다이제스트 파일>, /tmp/digests/<arm64 다이제스트 파일>이 같은 폴더에 나란히 다운로드
 
       - name: GHCR 로그인
         uses: docker/login-action@v4
@@ -206,6 +220,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 태그로 쓸 텍스트(문자열)만 미리 계산해서 만들어 둠(steps.meta.outputs.tag에 저장됨)
       - name: 이미지 메타데이터 추출 (태그/라벨)
         id: meta
         uses: docker/metadata-action@v6
@@ -226,6 +241,16 @@ jobs:
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+        # .tags: JSON에서 tags 배열만 뽑음
+        # map("-t " + .): 배열의 각 원소 앞에 "-t "를 붙임
+        # join(" ") → 공백으로 이어붙여 하나의 문자열로 만듦
+        # printf '...%s ' *는 셸의 glob 확장(*)으로 얻은 각 파일명을 %s 자리에 채워 넣으며 반복 출력
+        # [최종 형태 예]
+        # docker buildx imagetools create \
+        #   -t ghcr.io/felix-y-s/cicd-demo:latest \           # ← 결과물 이름표 ①
+        #   -t ghcr.io/felix-y-s/cicd-demo:sha-a1b2c3d \      # ← 결과물 이름표 ②
+        #   ghcr.io/felix-y-s/cicd-demo@sha256:abcd1234... \  # ← 재료 1 (amd64 이미지)
+        #   ghcr.io/felix-y-s/cicd-demo@sha256:efgh5678...    # ← 재료 2 (arm64 이미지)
 
       # GitHub Actions 빌드 로그 확인용 (Human Verification)
       - name: 최종 이미지 확인
@@ -240,7 +265,7 @@ jobs:
     needs: push-ghcr
 
     steps:
-      - name: SSH 개인키 준비
+      - name: SSH 개인키 준비(등록)
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
@@ -253,15 +278,15 @@ jobs:
           ssh -i ~/.ssh/deploy_key -p 2222 \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             deployer@localhost bash -s <<'EOF'
-            set -e
-            docker pull ghcr.io/felix-y-s/cicd-demo:latest
-            docker rm -f nest-app || true
-            docker run -d --name nest-app \
-              --add-host=host.docker.internal:192.168.65.254 \
-              --env-file /home/deployer/app.env \
-              -p 3000:3000 \
-              ghcr.io/felix-y-s/cicd-demo:latest
-          EOF
+              set -e
+              docker pull ghcr.io/felix-y-s/cicd-demo:latest
+              docker rm -f nest-app || true
+              docker run -d --name nest-app \
+                --add-host=host.docker.internal:192.168.65.254 \
+                --env-file /home/deployer/app.env \
+                -p 3000:3000 \
+                ghcr.io/felix-y-s/cicd-demo:latest
+            EOF
 
       - name: 배포 헬스체크
         run: |
