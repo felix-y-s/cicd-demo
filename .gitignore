@@ -66,5 +66,8 @@ scripts/
 Taskfile.yml
 taskfiles/
 
+# 단, 배포 서버 자동화 스크립트는 ci.yml이 실제로 사용하므로 버전 관리 대상
+!deploy-server/scripts/
+
 # 배포 서버 로컬 환경변수 (민감정보 포함)
 deploy-server/app.env

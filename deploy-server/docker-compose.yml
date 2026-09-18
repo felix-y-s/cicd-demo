@@ -1,0 +1,38 @@
+# "로컬 Linux 배포 서버" 3대를 하나의 compose 프로젝트로 정의한다.
+# 세 서비스 모두 같은 Dockerfile(같은 이미지)을 쓰고, 호스트에 노출하는
+# SSH 포트만 서로 다르게 잡아 GitHub Actions self-hosted 러너가 환경별로
+# 구분해서 접속할 수 있게 한다.
+#
+# 사용법 (deploy-server/ 안에서):
+#   docker compose up -d --build       # 3대 전부 기동
+#   docker compose up -d --build dev   # dev 서버만 기동
+services:
+  local-dev-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: local-dev-server
+    privileged: true # Docker-in-Docker 실행을 위해 필요 (entrypoint.sh가 dockerd를 기동)
+    restart: unless-stopped
+    ports:
+      - '2224:22'
+
+  local-staging-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: local-staging-server
+    privileged: true
+    restart: unless-stopped
+    ports:
+      - '2223:22'
+
+  local-deploy-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: local-deploy-server
+    privileged: true
+    restart: unless-stopped
+    ports:
+      - '2222:22'
