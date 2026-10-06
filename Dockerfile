@@ -5,6 +5,7 @@
 FROM node:22-alpine AS deps
 WORKDIR /app
 
+# pnpm 미포함 베이스 이미지라 lockfile과 동일 버전으로 설치/활성화
 RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
 
 COPY package.json pnpm-lock.yaml ./

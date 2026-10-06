@@ -1,0 +1,105 @@
+version: '3'
+
+# ☝️ ~/.ssh/config에 등록 필요
+#   Host cicd-deploy
+#     HostName localhost
+#     Port     2222
+#     User     deployer
+#     IdentityFile ~/.ssh/cicd-demo-deploy
+
+vars:
+  REPO: felix-y-s/cicd-demo
+  IMAGE: ghcr.io/{{.REPO}}
+  DEPLOY_SERVER_CONTAINER: local-deploy-server
+  PRIVATE_KEY: cicd-demo-deploy 
+  PUBLIC_KEY: cicd-demo-deploy.pub
+
+tasks:
+  default: 
+    cmds: 
+      - task -g --list | grep '^* deploy:'
+
+  # 배포 서버 빌드
+  build:
+    desc: "deploy 도커 이미지 빌드 (루트 Taskfile을 docker/deploy에 동기화 후 빌드)"
+    cmds:
+      # -t {이미지이름:태그} (-f) {Dockerfile이 위치한 디렉터리 경로}
+      - docker build -t {{.IMAGE}} docker/deploy/
+
+  up:
+    desc: "배포 서버 생성 및 시작"
+    summary: |
+      옵션:
+        TAG   - 이미지 태그           (기본값: local)
+    cmds:
+      # up: 컨테이너 생성 및 시작 (- 상태가 바뀐 컨테이너만 재생성)
+      # start: 이미 생성되어 있는(중지 상태인) 컨테이너를 단순히 다시 켜는 역할
+      # --build: 이미지를 다시 빌드
+      - docker compose -f docker/deploy/docker-compose.yml up -d
+
+  init:
+    desc: "배포 서버 접속 준비 (호스트 키 정리 + app.env 전송, local-deploy-server 재생성 후 1회)"
+    cmds:
+      # local-deploy-server 컨테이너가 재생성되면 서버 호스트 키가 바뀌어
+      # known_hosts의 이전 지문과 충돌한다("HOST IDENTIFICATION HAS CHANGED").
+      # 접속 전에 미리 정리해 둔다.
+      # > ~/.ssh/known_hosts에서 "[localhost]:2222" 키를 모두 삭제한다. (값은 서버의 공개키)
+      - ssh-keygen -R "[localhost]:2222" 2>/dev/null || true
+      # app.env도 컨테이너 재생성 시 함께 사라지므로(볼륨 미마운트),
+      # 로컬 .env를 "컨테이너 안에서 보는 호스트"(host.docker.internal)
+      # 기준으로 변환해 다시 올린다.
+      - |
+        sed \
+          -e 's#@localhost:#@host.docker.internal:#g' \
+          -e 's#REDIS_HOST=localhost#REDIS_HOST=host.docker.internal#' \
+          -e 's#NODE_ENV=development#NODE_ENV=production#' \
+          .env > /tmp/app.env
+        scp -i ~/.ssh/{{.PRIVATE_KEY}} -P 2222 -o StrictHostKeyChecking=accept-new \
+          /tmp/app.env deployer@localhost:/home/deployer/app.env
+        rm -f /tmp/app.env
+
+  update:
+    desc: "🟠 GHCR 최신 이미지로 배포 서버 컨테이너 교체(GitHub Actions deploy job 없이)"
+    cmds:
+      - |
+        ssh cicd-deploy bash -s <<'EOF'
+        set -e
+        docker pull {{.IMAGE}}:latest
+        docker rm -f nest-app || true
+        docker run -d --name nest-app \
+          --add-host=host.docker.internal:192.168.65.254 \
+          --env-file /home/deployer/app.env \
+          -p 3000:3000 \
+          {{.IMAGE}}:latest
+        EOF
+
+  it:
+    desc: "배포 서버 접속"
+    cmds:
+      - docker exec -it {{.DEPLOY_SERVER_CONTAINER}} sh
+
+  ssh:
+    desc: "배포 서버에 SSH 직접 접속"
+    interactive: true
+    cmds:
+      - ssh -i ~/.ssh/{{.PRIVATE_KEY}} -p 2222 deployer@localhost
+
+  logs:
+    desc: "배포 서버 로그 확인"
+    cmds:
+      - docker compose -f docker/deploy/docker-compose.yml logs {{.DEPLOY_SERVER_CONTAINER}} --tail=60 -f
+
+  remove:
+    desc: "배포 서버 삭제 (컨테이너 + 볼륨)"
+    cmds:
+      - docker compose -f docker/deploy/docker-compose.yml down -v
+
+  health:
+    desc: "배포 서버 앱 HTTP 응답 확인"
+    cmds:
+      - ssh {{.DEPLOY_HOST}} "curl -sf http://localhost:3000/ > /dev/null && echo '정상 응답' || echo '응답 없음'"
+
+  status:
+    desc: "배포 서버 nest-app 컨테이너 상태 확인"
+    cmds:
+      - ssh {{.DEPLOY_HOST}} "docker ps --filter name=nest-app --format 'table {{`{{.Names}}`}}\t{{`{{.Status}}`}}\t{{`{{.Ports}}`}}'"

@@ -1,0 +1,53 @@
+version: '3'
+
+# 자주 쓰는 CLI 옵션
+# task --list                # 전체 task 목록
+# task --summary deploy:ssh  # 특정 task 상세 정보
+# task -n deploy:update      # dry-run (실제 실행 없이 명령어 확인)
+
+includes:
+  app:    ./taskfiles/app.yml
+  deploy: ./taskfiles/deploy.yml
+  db:     ./taskfiles/db.yml
+  infra:  ./taskfiles/infra.yml
+
+vars:
+  PRIVATE_KEY: cicd-demo-deploy 
+  PUBLIC_KEY: cicd-demo-deploy.pub
+
+tasks:
+  default:
+    silent: true
+    cmds:
+      - |
+        echo ""
+        echo "사용 가능한 명령어 그룹"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  app:    애플리케이션 서버 관련"
+        echo "  deploy: 배포 관련 (build, ssh, update...)"
+        echo "  infra:  인프라 서버 관련"
+        echo "  db:     데이터베이스 관련 (migrate, studio...)"
+        echo ""
+        echo "자주 쓰는 CLI 옵션"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  task --summary db:studio"
+        echo ""
+      - task --list  
+
+  # ================================================
+  # 기타
+  # ================================================
+  ssh-keygen:
+    desc: "배포용 SSH 키 쌍 생성 + authorized_keys 반영 + GitHub Secrets 등록 (최초 1회만)"
+    cmds:
+      # -C: "이게 누구 키인지 구분할수 있는 주석 문자열(동작에 영향 X)" 
+      - | 
+        ssh-keygen -t ed25519 -f ~/.ssh/{{.PRIVATE_KEY}} -N "" -C "cicd-demo-deploy-practice"
+        cp ~/.ssh/{{.PUBLIC_KEY}} docker/deploy/authorized_keys
+      # SSH 개인키를 GitHub Secrets에 등록
+      - cat ~/.ssh/{{.PRIVATE_KEY}} | gh secret set DEPLOY_SSH_PRIVATE_KEY --repo felix-y-s/cicd-demo
+  logs:server:install:
+    desc: "도커 웹용 로그 서버 설치(localhost:8080)"
+    cmds:
+      - |
+        docker run -d -v /var/run/docker.sock:/var/run/docker.sock -v dozzle_data:/data -p 8080:8080 amir20/dozzle:latest

@@ -1,0 +1,21 @@
+version: '3'
+
+tasks:
+  default: 
+    cmds: 
+      - task --list | grep '^* infra:'
+
+  down:
+    desc: "인프라 서버 전체 종료 및 컨테이너 삭제"
+    cmds:
+      - docker compose -f docker/infra/docker-compose.yml down -v
+
+  up:
+    desc: "인프라 서버 전체 시작"
+    cmd: docker compose -f docker/infra/docker-compose.yml up -d  
+  
+  logs:
+    desc: "인프라 서버 로그 (예: task infra:logs -- mongodb postgres)"
+    cmds:
+      - |
+        docker compose -f docker/infra/docker-compose.yml logs {{.CLI_ARGS}} --tail=60 -f

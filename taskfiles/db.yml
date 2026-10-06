@@ -1,0 +1,21 @@
+version: '3'
+
+tasks:
+  default: 
+    cmds: 
+      - task --list | grep '^* db:'
+
+  migrate:
+    desc: "마이그레이션 생성 + DB 적용 (개발용)"
+    cmds:
+      - npx prisma migrate dev
+
+  migrate-deploy:
+    desc: "마이그레이션 적용만 (CI/CD와 동일)"
+    cmds:
+      - npx prisma migrate deploy
+
+  studio:
+    desc: "Prisma Studio 실행 (localhost:5555)"
+    cmds:
+      - npx prisma studio
