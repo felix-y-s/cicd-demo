@@ -2,6 +2,7 @@ name: docker-deploy
 
 services:
   local-deploy-server:
+    image: local-deploy-server
     build:
       context: .
       dockerfile: Dockerfile

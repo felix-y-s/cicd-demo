@@ -11,7 +11,10 @@ vars:
   REPO: felix-y-s/cicd-demo
   IMAGE: ghcr.io/{{.REPO}}
   DEPLOY_SERVER_CONTAINER: local-deploy-server
-  PRIVATE_KEY: cicd-demo-deploy 
+  # "배포 서버"(SSH 접속되는 더미 Linux 서버) 자체의 이미지.
+  # 위 IMAGE(앱 이미지, GHCR push 대상)와는 완전히 별개 용도라 이름을 구분한다.
+  DEPLOY_SERVER_IMAGE: local-deploy-server
+  PRIVATE_KEY: cicd-demo-deploy
   PUBLIC_KEY: cicd-demo-deploy.pub
 
 tasks:
@@ -21,10 +24,10 @@ tasks:
 
   # 배포 서버 빌드
   build:
-    desc: "deploy 도커 이미지 빌드 (루트 Taskfile을 docker/deploy에 동기화 후 빌드)"
+    desc: "배포 서버(SSH 더미 Linux 서버) 이미지 빌드"
     cmds:
       # -t {이미지이름:태그} (-f) {Dockerfile이 위치한 디렉터리 경로}
-      - docker build -t {{.IMAGE}} docker/deploy/
+      - docker build -t {{.DEPLOY_SERVER_IMAGE}} docker/deploy/
 
   up:
     desc: "배포 서버 생성 및 시작"
@@ -99,7 +102,7 @@ tasks:
     cmds:
       - ssh {{.DEPLOY_HOST}} "curl -sf http://localhost:3000/ > /dev/null && echo '정상 응답' || echo '응답 없음'"
 
-  status:
-    desc: "배포 서버 nest-app 컨테이너 상태 확인"
+  ps:
+    desc: "배포 서버 local-deploy-server 컨테이너 상태 확인"
     cmds:
-      - ssh {{.DEPLOY_HOST}} "docker ps --filter name=nest-app --format 'table {{`{{.Names}}`}}\t{{`{{.Status}}`}}\t{{`{{.Ports}}`}}'"
+      - docker ps --filter name={{.DEPLOY_SERVER_CONTAINER}} --format 'table {{`{{.Names}}`}}\t{{`{{.Status}}`}}\t{{`{{.Ports}}`}}'

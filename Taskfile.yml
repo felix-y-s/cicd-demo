@@ -34,6 +34,10 @@ tasks:
         echo ""
       - task --list  
 
+  ps:
+    cmds:
+      - docker ps --filter name={{.CLI_ARGS}} --format 'table {{`{{.Names}}`}}\t{{`{{.Image}}`}}\t{{`{{.Status}}`}}\t{{`{{.Ports}}`}}'
+
   # ================================================
   # 기타
   # ================================================

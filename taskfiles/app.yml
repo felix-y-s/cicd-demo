@@ -41,13 +41,13 @@ tasks:
     cmds:
       - docker buildx imagetools inspect {{.IMAGE}}:{{.TAG}}
 
-  # 애플리케이션 서버 이미지 삭제
-  rmi:
-    desc: "애플리케이션 이미지 삭제"
-    cmd: docker rmi -f {{.REPO}}
-
   # 애플리케이션 서버 접속(docker 안에 docker)
   it:
     desc: "배포 서버 안에 앱서버에 접속"
     cmds:
       - docker exec -it {{.DEPLOY_SERVER_CONTAINER}} docker exec -it nest-app sh
+
+  ps:
+    desc: "배포 서버 nest-app 컨테이너 상태 확인"
+    cmds:
+      - docker exec {{.DEPLOY_SERVER_CONTAINER}} docker ps --filter name=nest-app --format 'table {{`{{.Names}}`}}\t{{`{{.Status}}`}}\t{{`{{.Ports}}`}}'
