@@ -1,0 +1,36 @@
+version: '3'
+# 사용 안되는 파일(템플릿 용)
+tasks:
+  default: 
+    cmds: 
+      - task -g --list | grep '^* dk:'
+
+  push:
+    desc: "amd64/arm64 멀티플랫폼 빌드 후 GHCR 푸시 (GITHUB_TOKEN 필요)"
+    vars:
+      TAG: '{{.TAG | default "latest"}}'
+    preconditions:
+      - sh: test -n "$GITHUB_TOKEN"
+        msg: "GITHUB_TOKEN 환경변수가 필요합니다"
+    cmds:
+      - echo "$GITHUB_TOKEN" | docker login ghcr.io -u {{.REPO | splitList "/" | first}} --password-stdin
+      - docker buildx build
+          --platform linux/amd64,linux/arm64
+          -t {{.IMAGE}}:{{.TAG}}
+          --push .
+
+  run:
+    desc: "로컬 이미지 컨테이너 실행 (예: task docker:run TAG=local NAME=app HOST=3000 CONT=3000)"
+    summary: |
+      옵션:
+        TAG   - 이미지 태그           (기본값: local)
+        NAME  - 컨테이너 이름         (기본값: cicd-demo)
+        HOST  - 호스트 포트           (기본값: 3000)
+        CONT  - 컨테이너 내부 포트    (기본값: 3000)
+    vars:
+      TAG:  '{{.TAG  | default "local"}}'
+      NAME: '{{.NAME | default "cicd-demo"}}'
+      HOST: '{{.HOST | default "3000"}}'
+      CONT: '{{.CONT | default "3000"}}'
+    cmds:
+      - docker run --rm --name {{.NAME}} -p {{.HOST}}:{{.CONT}} {{.REPO}}:{{.TAG}}

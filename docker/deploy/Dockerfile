@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sudo \
     curl \
     ca-certificates \
+    tmux \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /var/run/sshd
@@ -31,6 +32,16 @@ RUN mkdir -p /home/${DEPLOY_USER}/.ssh \
 COPY authorized_keys /home/${DEPLOY_USER}/.ssh/authorized_keys
 RUN chmod 600 /home/${DEPLOY_USER}/.ssh/authorized_keys \
     && chown ${DEPLOY_USER}:${DEPLOY_USER} /home/${DEPLOY_USER}/.ssh/authorized_keys
+
+# tmux 설정 (~/.config/tmux/tmux.conf와 동일, 플러그인 제외)
+RUN mkdir -p /home/${DEPLOY_USER}/.config/tmux
+COPY tmux.conf /home/${DEPLOY_USER}/.config/tmux/tmux.conf
+RUN chown -R ${DEPLOY_USER}:${DEPLOY_USER} /home/${DEPLOY_USER}/.config
+
+# SSH 로그인 시 자동으로 tmux 세션에 진입(이미 tmux 안이면 중복 진입 방지).
+# "deploy"라는 고정 세션 이름을 재사용해 재접속해도 같은 세션으로 돌아온다.
+RUN echo '\n# SSH 로그인 시 tmux 자동 진입\nif [ -z "$TMUX" ] && [ -n "$SSH_CONNECTION" ]; then\n  exec tmux new-session -A -s deploy\nfi' \
+    >> /home/${DEPLOY_USER}/.bashrc
 
 RUN sed -i \
     -e 's/#PasswordAuthentication yes/PasswordAuthentication no/' \

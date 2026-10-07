@@ -1,0 +1,16 @@
+name: docker-deploy
+
+services:
+  local-deploy-server:
+    image: local-deploy-server
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: local-deploy-server
+    # Docker-in-Docker(내부에서 dockerd를 직접 기동)를 위해 필요하다.
+    privileged: true
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    ports:
+      - '2222:22'
+    restart: unless-stopped

@@ -1,0 +1,53 @@
+version: '3'
+
+vars:
+  REPO: felix-y-s/cicd-demo
+  IMAGE: ghcr.io/{{.REPO}}
+  DEPLOY_SERVER_CONTAINER: local-deploy-server
+  
+tasks:
+  default: 
+    cmds: 
+      - task --list | grep '^* app:'
+
+  # 애플리케이션 서버 이미지 빌드
+  build:
+    desc: "애플리케이션 이미지 빌드"
+    vars:
+      TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - |
+        docker build -t {{.REPO}}:{{.TAG}} . 
+      - docker images | rg {{.REPO}} || echo -e "\033[31m이미지 조회안됨 ({{.REPO}})\033[0m"
+        
+  push:
+    desc: "amd64/arm64 멀티플랫폼 빌드 후 GHCR 푸시 (GITHUB_TOKEN 필요)"
+    vars:
+      TAG: '{{.TAG | default "latest"}}'
+    preconditions:
+      - sh: test -n "$GITHUB_TOKEN"
+        msg: "GITHUB_TOKEN 환경변수가 필요합니다"
+    cmds:
+      - echo "$GITHUB_TOKEN" | docker login ghcr.io -u {{.REPO | splitList "/" | first}} --password-stdin
+      - docker buildx build
+          --platform linux/amd64,linux/arm64
+          -t {{.IMAGE}}:{{.TAG}}
+          --push .
+
+  inspect:
+    desc: "GHCR 이미지의 멀티플랫폼 매니페스트(amd64/arm64 포함 여부) 확인"
+    vars:
+        TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - docker buildx imagetools inspect {{.IMAGE}}:{{.TAG}}
+
+  # 애플리케이션 서버 접속(docker 안에 docker)
+  it:
+    desc: "배포 서버 안에 앱서버에 접속"
+    cmds:
+      - docker exec -it {{.DEPLOY_SERVER_CONTAINER}} docker exec -it nest-app sh
+
+  ps:
+    desc: "배포 서버 nest-app 컨테이너 상태 확인"
+    cmds:
+      - docker exec {{.DEPLOY_SERVER_CONTAINER}} docker ps --filter name=nest-app --format 'table {{`{{.Names}}`}}\t{{`{{.Status}}`}}\t{{`{{.Ports}}`}}'
