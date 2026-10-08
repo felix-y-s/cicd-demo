@@ -4,6 +4,7 @@ import type { User } from '@prisma/client';
 import {
   EmailAlreadyExistsException,
   InvalidCredentialsException,
+  UserNotFoundException,
 } from '../../common/exception/index.js';
 import type { CreateUserDto } from '../auth/dto/create-user.dto.js';
 import { UsersRepository } from './repositories/users.repository.js';
@@ -48,5 +49,27 @@ export class UsersService {
     if (!isPasswordValid) throw new InvalidCredentialsException();
 
     return user;
+  }
+
+  /**
+   * 내 정보 조회
+   * @param id 사용자 ID
+   * @returns 사용자 객체
+   * @throws UserNotFoundException 사용자가 존재하지 않거나 이미 탈퇴한 경우
+   */
+  async findMe(id: string): Promise<User> {
+    const user = await this.usersRepository.findById(id);
+    if (!user) throw new UserNotFoundException();
+    return user;
+  }
+
+  /**
+   * 회원 탈퇴 (soft delete) — refreshToken도 함께 무효화해 재로그인을 막는다
+   * @param id 사용자 ID
+   * @throws UserNotFoundException 사용자가 존재하지 않거나 이미 탈퇴한 경우
+   */
+  async withdraw(id: string): Promise<void> {
+    await this.findMe(id);
+    await this.usersRepository.softDelete(id);
   }
 }

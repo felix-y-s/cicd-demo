@@ -51,6 +51,18 @@ export class EmailAlreadyExistsException extends ConflictException {
 }
 
 /**
+ * 요청한 사용자가 존재하지 않거나 이미 탈퇴(soft delete)한 경우.
+ */
+export class UserNotFoundException extends NotFoundException {
+  constructor() {
+    super({
+      code: ErrorCode.USER_NOT_FOUND,
+      message: '사용자를 찾을 수 없습니다',
+    });
+  }
+}
+
+/**
  * 요청한 게시글이 존재하지 않는 경우.
  */
 export class PostNotFoundException extends NotFoundException {

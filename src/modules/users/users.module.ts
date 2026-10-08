@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { UsersRepository } from './repositories/users.repository.js';
+import { UsersController } from './users.controller.js';
 import { UsersService } from './users.service.js';
 
 /**
@@ -7,6 +8,7 @@ import { UsersService } from './users.service.js';
  * - UsersService를 export해 AuthModule에서 주입받아 사용한다.
  */
 @Module({
+  controllers: [UsersController],
   providers: [UsersRepository, UsersService],
   exports: [UsersRepository, UsersService],
 })
