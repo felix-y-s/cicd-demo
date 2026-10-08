@@ -63,6 +63,3 @@ logs/
 
 # 개인 학습용 스크립트 (로컬 전용)
 scripts/
-Taskfile.yml
-taskfiles/
-

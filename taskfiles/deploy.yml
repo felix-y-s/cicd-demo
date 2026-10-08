@@ -40,14 +40,18 @@ tasks:
       # --build: 이미지를 다시 빌드
       - docker compose -f docker/deploy/docker-compose.yml up -d
 
-  init:
-    desc: "배포 서버 접속 준비 (호스트 키 정리 + app.env 전송, local-deploy-server 재생성 후 1회)"
+  init:ssh:
+    desc: "배포 서버 접속 준비 (호스트 키 정리, local-deploy-server 재생성 후 1회)"
     cmds:
       # local-deploy-server 컨테이너가 재생성되면 서버 호스트 키가 바뀌어
       # known_hosts의 이전 지문과 충돌한다("HOST IDENTIFICATION HAS CHANGED").
       # 접속 전에 미리 정리해 둔다.
       # > ~/.ssh/known_hosts에서 "[localhost]:2222" 키를 모두 삭제한다. (값은 서버의 공개키)
       - ssh-keygen -R "[localhost]:2222" 2>/dev/null || true
+      
+  init:env:
+    desc: "배포 서버 접속 준비 (app.env 전송, local-deploy-server 재생성 후 1회)"
+    cmds:
       # app.env도 컨테이너 재생성 시 함께 사라지므로(볼륨 미마운트),
       # 로컬 .env를 "컨테이너 안에서 보는 호스트"(host.docker.internal)
       # 기준으로 변환해 다시 올린다.
@@ -63,6 +67,8 @@ tasks:
 
   update:
     desc: "🟠 GHCR 최신 이미지로 배포 서버 컨테이너 교체(GitHub Actions deploy job 없이)"
+    deps:
+      - init:env # app.env이 배포서버에 존재해야 배포가 성공, 먼저 task init:env 실행한다.
     cmds:
       - |
         ssh cicd-deploy bash -s <<'EOF'
